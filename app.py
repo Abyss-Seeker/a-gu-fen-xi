@@ -72,6 +72,19 @@ def save_config(cfg):
         pass
 
 
+
+def get_ai_config():
+    """Get AI config: prefer request body, fall back to config.json."""
+    try:
+        data = request.get_json(silent=True)
+        if data and isinstance(data, dict) and data.get("ai_chat"):
+            cc = data["ai_chat"]
+            if cc.get("api_key") and not str(cc["api_key"]).startswith("sk-your"):
+                return cc
+    except Exception:
+        pass
+    cfg = load_config()
+    return cfg.get("ai_chat", {})
 def cached(key, ttl=CACHE_TTL):
     """Simple in-memory cache decorator."""
     now = time.time()
@@ -1599,20 +1612,25 @@ def index():
 def api_config():
     if request.method == "GET":
         cfg = load_config()
-        # Mask API key for security
-        cfg["ai_chat"]["api_key"] = cfg["ai_chat"]["api_key"][:8] + "****" if len(cfg["ai_chat"]["api_key"]) > 8 else "****"
+        if "ai_chat" not in cfg:
+            cfg["ai_chat"] = {}
+        ak = cfg["ai_chat"].get("api_key", "")
+        if len(ak) > 8:
+            cfg["ai_chat"]["api_key"] = ak[:8] + "****"
+        elif ak:
+            cfg["ai_chat"]["api_key"] = "****"
         return jsonify(cfg)
     else:
         data = request.json
         cfg = load_config()
+        if "ai_chat" not in cfg:
+            cfg["ai_chat"] = {}
         if data.get("ai_chat"):
             for k in ["provider", "api_key", "api_base", "model", "system_prompt"]:
                 if k in data["ai_chat"] and data["ai_chat"][k]:
                     cfg["ai_chat"][k] = data["ai_chat"][k]
         save_config(cfg)
         return jsonify({"status": "ok"})
-
-
 @app.route("/api/analyze", methods=["POST"])
 def analyze():
     data = request.json
@@ -1647,8 +1665,7 @@ def chat():
     if not message:
         return jsonify({"error": "请输入消息"}), 400
 
-    cfg = load_config()
-    chat_cfg = cfg.get("ai_chat", {})
+    chat_cfg = get_ai_config()
 
     if not chat_cfg.get("api_key") or chat_cfg["api_key"].startswith("sk-your"):
         return jsonify({
@@ -1697,8 +1714,7 @@ def static_files(path):
 @app.route("/api/test_chat", methods=["POST"])
 def test_chat():
     """Test the chat configuration."""
-    cfg = load_config()
-    chat_cfg = cfg.get("ai_chat", {})
+    chat_cfg = get_ai_config()
 
     if not chat_cfg.get("api_key") or chat_cfg["api_key"].startswith("sk-your"):
         return jsonify({"success": False, "message": "API Key 未配置"})
@@ -1749,8 +1765,7 @@ def deep_analyze():
                 "cached_at": datetime.fromtimestamp(cached_ts).strftime("%H:%M:%S"),
             })
 
-    cfg = load_config()
-    chat_cfg = cfg.get("ai_chat", {})
+    chat_cfg = get_ai_config()
 
     if not chat_cfg.get("api_key") or chat_cfg["api_key"].startswith("sk-your"):
         return jsonify({
@@ -1966,8 +1981,7 @@ def timing_analysis():
     if total_score < 40:
         return jsonify({"reply": "当前评分较低，暂不推荐购入时机分析。", "skip": True})
 
-    cfg = load_config()
-    chat_cfg = cfg.get("ai_chat", {})
+    chat_cfg = get_ai_config()
 
     # Fetch market index data for richer context
     index_data = _get_market_indices()
@@ -2628,8 +2642,7 @@ def alt_deep_compare():
     alt_stock = data.get("alt_stock", {})
     current_stock = data.get("current_stock", {})
 
-    cfg = load_config()
-    chat_cfg = cfg.get("ai_chat", {})
+    chat_cfg = get_ai_config()
 
     # Build context for the LLM
     alt_name = alt_stock.get("name", "替代标的")

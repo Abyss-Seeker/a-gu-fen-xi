@@ -1015,7 +1015,7 @@
       const resp = await fetch('/api/alt_deep_compare', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ alt_stock: alt, current_stock: curSimple }),
+        body: JSON.stringify({ alt_stock: alt, current_stock: curSimple, ai_chat: getAiConfig() }),
         signal: controller.signal,
       });
 
@@ -1140,6 +1140,7 @@
         stock_data: currentReport,
         force: forceReanalyze,
         debug: isDebug(),
+        ai_chat: getAiConfig(),
       };
       addDebugLog(`🔬 深度分析请求 [${dimKey}]`, {
         api: '/api/deep_analyze',
@@ -1235,7 +1236,7 @@
       const resp = await fetch('/api/timing', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ stock_data: currentReport }),
+        body: JSON.stringify({ stock_data: currentReport, ai_chat: getAiConfig() }),
       });
       const data = await resp.json();
 
@@ -1388,10 +1389,11 @@
     }
 
     try {
+      const aiCfg = getAiConfig();
       const resp = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: msg, stock_context: stockCtx }),
+        body: JSON.stringify({ message: msg, stock_context: stockCtx, ai_chat: aiCfg }),
       });
       const data = await resp.json();
       thinkingDiv.remove();
@@ -1418,18 +1420,32 @@
 
   async function openSettings() {
     settingsOverlay.classList.add('open');
+    // Load from localStorage first (always works), then try server
+    const localChat = {
+      provider: localStorage.getItem('ai_provider') || 'openai',
+      api_key: localStorage.getItem('ai_api_key') || '',
+      api_base: localStorage.getItem('ai_api_base') || 'https://api.openai.com/v1',
+      model: localStorage.getItem('ai_model') || 'gpt-4o-mini',
+      system_prompt: localStorage.getItem('ai_system_prompt') || '',
+    };
+    $('#apiProvider').value = localChat.provider;
+    $('#apiKey').value = '';
+    $('#apiKey').placeholder = localChat.api_key ? localChat.api_key.slice(0, 8) + '****' : '输入你的 API Key';
+    $('#apiBase').value = localChat.api_base;
+    $('#apiModel').value = localChat.model;
+    $('#systemPrompt').value = localChat.system_prompt;
+
+    // Also try loading from server (may fail on Vercel)
     try {
       const resp = await fetch('/api/config');
       const cfg = await resp.json();
       const chat = cfg.ai_chat || {};
-      $('#apiProvider').value = chat.provider || 'openai';
-      $('#apiKey').value = '';
-      $('#apiKey').placeholder = chat.api_key || '输入你的 API Key';
-      $('#apiBase').value = chat.api_base || 'https://api.openai.com/v1';
-      $('#apiModel').value = chat.model || 'gpt-4o-mini';
-      $('#systemPrompt').value = chat.system_prompt || '';
+      if (chat.provider) $('#apiProvider').value = chat.provider;
+      if (chat.api_base) $('#apiBase').value = chat.api_base;
+      if (chat.model) $('#apiModel').value = chat.model;
+      if (chat.system_prompt) $('#systemPrompt').value = chat.system_prompt;
     } catch (err) {
-      console.error('Config load error:', err);
+      // Server load failed, localStorage values already set
     }
   }
 
@@ -1443,20 +1459,28 @@
     const apiModel = $('#apiModel').value.trim();
     const systemPrompt = $('#systemPrompt').value.trim();
 
-    const payload = {
-      ai_chat: {
-        provider: $('#apiProvider').value,
-        api_base: apiBase || 'https://api.openai.com/v1',
-        model: apiModel || 'gpt-4o-mini',
-        system_prompt: systemPrompt || '你是一位专业的股票投资分析师。',
-      }
+    const chatCfg = {
+      provider: $('#apiProvider').value,
+      api_key: apiKey && !apiKey.includes('****') ? apiKey : (localStorage.getItem('ai_api_key') || ''),
+      api_base: apiBase || 'https://api.openai.com/v1',
+      model: apiModel || 'gpt-4o-mini',
+      system_prompt: systemPrompt || '你是一位专业的股票投资分析师。',
     };
-    // Only update API key if provided
-    if (apiKey && !apiKey.includes('****')) {
-      payload.ai_chat.api_key = apiKey;
-    }
 
+    // Always save to localStorage (works on Vercel)
+    localStorage.setItem('ai_provider', chatCfg.provider);
+    localStorage.setItem('ai_api_key', chatCfg.api_key);
+    localStorage.setItem('ai_api_base', chatCfg.api_base);
+    localStorage.setItem('ai_model', chatCfg.model);
+    localStorage.setItem('ai_system_prompt', chatCfg.system_prompt);
+
+    // Also try to save to server (may fail on Vercel)
     try {
+      const payload = { ai_chat: chatCfg };
+      delete payload.ai_chat.api_key;  // don't send empty key
+      if (apiKey && !apiKey.includes('****')) {
+        payload.ai_chat.api_key = apiKey;
+      }
       const resp = await fetch('/api/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1466,10 +1490,13 @@
       if (data.status === 'ok') {
         alert('设置已保存！');
         closeSettings();
+        return;
       }
     } catch (err) {
-      alert('保存失败: ' + err.message);
+      // Server save failed, but localStorage is already saved
     }
+    alert('设置已保存到本地浏览器！（服务器端保存不可用）');
+    closeSettings();
   });
 
   $('#testChat').addEventListener('click', async () => {
@@ -1499,7 +1526,12 @@
     resultDiv.textContent = '测试中...';
 
     try {
-      const resp = await fetch('/api/test_chat', { method: 'POST' });
+      const aiCfg = getAiConfig();
+      const resp = await fetch('/api/test_chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ai_chat: aiCfg }),
+      });
       const data = await resp.json();
       if (data.success) {
         resultDiv.className = 'test-result success';
@@ -1544,6 +1576,16 @@
     const div = document.createElement('div');
     div.textContent = str;
     return div.innerHTML;
+  }
+
+  function getAiConfig() {
+    return {
+      api_key: localStorage.getItem('ai_api_key') || '',
+      api_base: localStorage.getItem('ai_api_base') || 'https://api.openai.com/v1',
+      model: localStorage.getItem('ai_model') || 'gpt-4o-mini',
+      provider: localStorage.getItem('ai_provider') || 'openai',
+      system_prompt: localStorage.getItem('ai_system_prompt') || '',
+    };
   }
 
   // Debug unlock

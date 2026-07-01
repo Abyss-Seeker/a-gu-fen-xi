@@ -1384,69 +1384,68 @@ def index():
 
 
 
-def _akshare_get_industry_peers(code):
-    """Use AKShare to find peer stocks in the same industry."""
+import re
+import json
+import requests
+from urllib.parse import quote
+
+def _get_industry_peers_by_board(code):
+    """Get peer stocks using board_code via _em_fetch(). Reliable, no akshare needed."""
     try:
-        import akshare as ak
+        ind_data = get_industry_data(code)
+        board_code = ind_data.get('board_code', '')
+        board_name = ind_data.get('board_name', '')
+        if not board_code:
+            print(f"[_get_industry_peers_by_board] No board_code for {code}")
+            return []
+
+        # Use Eastmoney datacenter API to get constituents
+        # Dataset: RPT_BK_ORDINARY_STOCK (industry board stocks)
+        filter_str = f'(BOARD_CODE="{board_code}")'
+        records = _em_fetch(
+            "RPT_BK_ORDINARY_STOCK",
+            "SECURITY_CODE,SECURITY_NAME_ABBR",
+            filter_str,
+            pagesize=50
+        )
+
+        if not records:
+            print(f"[_get_industry_peers_by_board] No records for board {board_code}")
+            return []
+
         symbol = code.replace('.SZ', '').replace('.SH', '').replace('.BJ', '')
-        # 1. Get stock's industry
-        info_df = ak.stock_individual_info_em(symbol=symbol)
-        if info_df is None or info_df.empty:
-            return []
-        info_dict = dict(zip(info_df['item'], info_df['value']))
-        industry = info_dict.get('行业', '')
-        if not industry:
-            return []
-
-        # 2. Find matching industry board
-        boards_df = ak.stock_board_industry_name_em()
-        if boards_df is None or boards_df.empty:
-            return []
-        target_board = None
-        for _, row in boards_df.iterrows():
-            bn = str(row.get('板块名称', ''))
-            if industry in bn or bn in industry:
-                target_board = bn
-                break
-        if not target_board:
-            for _, row in boards_df.iterrows():
-                bn = str(row.get('板块名称', ''))
-                if len(industry) >= 2 and industry[:2] in bn:
-                    target_board = bn
-                    break
-        if not target_board:
-            return []
-
-        # 3. Get constituents
-        cons_df = ak.stock_board_industry_cons_em(symbol=target_board)
-        if cons_df is None or cons_df.empty:
-            return []
         peers = []
-        for _, row in cons_df.iterrows():
-            c = str(row.get('代码', '')).zfill(6)
-            n = str(row.get('名称', ''))
+        for rec in records:
+            c = str(rec.get('SECURITY_CODE', '')).zfill(6)
             if c == symbol:
                 continue
+            n = rec.get('SECURITY_NAME_ABBR', '')
             wc = 'sh' + c if c.startswith(('6', '9')) else 'sz' + c
             peers.append({'code': c, 'name': n, 'wc': wc})
+
+        print(f"[_get_industry_peers_by_board] Found {len(peers)} peers for board {board_name} ({board_code})")
         return peers
     except Exception as e:
-        print(f"[_akshare_get_industry_peers] Error: {e}")
+        print(f"[_get_industry_peers_by_board] Error: {e}")
+        import traceback
+        traceback.print_exc()
         return []
 
 
 def _tencent_search_peers(symbol, keyword):
     """Fallback: use Tencent stock search to find peers by keyword."""
     try:
-        import requests
-        from urllib.parse import quote
-        resp = requests.get(
-            f"https://smartbox.gtimg.cn/s3/?q={quote(keyword)}&t=gp",
-            headers={"User-Agent": "Mozilla/5.0"}, timeout=10
-        )
+        url = f"https://smartbox.gtimg.cn/s3/?q={quote(keyword)}&t=gp"
+        resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
         if resp.status_code != 200:
             return []
-        data = resp.json()
+        text = resp.text.strip()
+        # API returns JSONP: callback_func({...})
+        m = re.search(r'\((\{.*\})\)', text, re.DOTALL)
+        if m:
+            data = json.loads(m.group(1))
+        else:
+            data = resp.json()
         items = data.get('data', [])
         peers = []
         for item in items:
@@ -1473,7 +1472,6 @@ def _batch_get_quotes(wc_codes):
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Referer": "https://gu.qq.com/",
     }
-    import requests
     for i in range(0, len(wc_codes), batch_size):
         batch = wc_codes[i:i+batch_size]
         q = ','.join(batch)
@@ -1510,8 +1508,9 @@ def _batch_get_quotes(wc_codes):
             print(f"[_batch_get_quotes] Error: {e}")
     return result
 
+
 def find_alternatives(code):
-    """Find peer stocks in the same industry. Vercel-safe (no westock CLI)."""
+    """Find peer stocks in the same industry. Pure HTTP, Vercel-safe."""
     cache_key = f"alt_{code}"
     cached_val = cached(cache_key, ttl=600)
     if cached_val:
@@ -1520,8 +1519,9 @@ def find_alternatives(code):
     try:
         symbol = code.replace('.SZ', '').replace('.SH', '').replace('.BJ', '')
 
-        # Method 1: AKShare industry peers
-        peers = _akshare_get_industry_peers(code)
+        # Method 1: Use board_code from get_industry_data (primary)
+        peers = _get_industry_peers_by_board(code)
+        print(f"[find_alternatives] Method1 found {len(peers)} peers for {code}")
 
         # Method 2: Fallback - search by industry keyword
         if not peers:
@@ -1533,14 +1533,16 @@ def find_alternatives(code):
                 clean_kw = search_kw.replace('Ⅰ', '').replace('Ⅱ', '').replace('Ⅲ', '').strip()[:4]
                 if clean_kw and len(clean_kw) >= 2:
                     peers = _tencent_search_peers(symbol, clean_kw)
+                    print(f"[find_alternatives] Method2 found {len(peers)} peers for {code}")
 
         if not peers:
+            print(f"[find_alternatives] No peers found for {code}")
             cache_set(cache_key, [])
             return []
 
         # Batch get quotes from Tencent API
-        peer_wcs = [p['wc'] for p in peers[:30]]
-        quotes = _batch_get_quotes(peer_wcs)
+        peer_codes = [p['wc'] for p in peers[:30]]
+        quotes = _batch_get_quotes(peer_codes)
 
         alternatives = []
         for p in peers[:30]:
@@ -1549,22 +1551,27 @@ def find_alternatives(code):
             pe = q.get('pe', 0) or 0
             if pe <= 0 or pe > 200:
                 continue
+            pb = q.get('pb', 0) or 0
+            price = q.get('price', 0) or 0
+            change = q.get('change_pct', 0) or 0
+            mcap = q.get('mcap', 0) or 0
             alternatives.append({
                 'code': p['code'],
                 'wc': wc,
                 'name': p.get('name', q.get('name', '')),
-                'price': q.get('price', 0) or 0,
+                'price': price,
                 'pe': pe,
-                'pb': q.get('pb', 0) or 0,
-                'change': q.get('change_pct', 0) or 0,
-                'market_cap': q.get('mcap', 0) or 0,
+                'pb': pb,
+                'change': change,
+                'market_cap': mcap,
             })
 
         if not alternatives:
+            print(f"[find_alternatives] No valid quotes for peers of {code}")
             cache_set(cache_key, [])
             return []
 
-        # Sort by PE (low = value), take top 6
+        # Sort by PE (low = value)
         alternatives.sort(key=lambda x: x['pe'])
         top = alternatives[:6]
 
@@ -1587,25 +1594,27 @@ def find_alternatives(code):
                     a['industry_board'] = (analysis.get('raw', {}).get('industry', {}) or {}).get('board', '')
                     result.append(a)
             except Exception as e:
-                print(f"[find_alternatives] analyze_stock failed for {full_code}: {e}")
+                print(f'[find_alternatives] analyze_stock failed for {full_code}: {e}')
 
+        # Sort by total_score desc
         result.sort(key=lambda x: x.get('total_score', 0), reverse=True)
         result = result[:4]
 
+        # Ensure code_full is set
         for a in result:
             if 'code_full' not in a:
                 wc = a.get('wc', '')
                 a['code_full'] = a['code'] + ('.SH' if wc.startswith('sh') else '.SZ')
 
+        print(f"[find_alternatives] Final result: {len(result)} alternatives for {code}")
         cache_set(cache_key, result)
         return result
 
     except Exception as e:
-        print(f"Error finding alternatives: {e}")
+        print(f'[find_alternatives] Error: {e}')
         import traceback
         traceback.print_exc()
         return []
-
 
 @app.route("/api/config", methods=["GET", "POST"])
 def api_config():

@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>个股深度诊断报告</title>
+  <link rel="stylesheet" href="/static/css/style.css?v={{ cache_buster }}">
+  <style>
+    /* Quick-start examples */
+    .quick-examples { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+    .quick-example {
+      padding: 4px 12px; background: #f1f2f6; border-radius: 16px;
+      font-size: 0.8rem; cursor: pointer; border: 1px solid var(--border);
+      transition: all 0.2s;
+    }
+    .quick-example:hover { background: var(--primary-light); color: #fff; border-color: var(--primary); }
+    .search-hint { font-size: 0.75rem; color: var(--text-secondary); margin-top: 4px; }
+    .tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600; margin-right: 4px; }
+    .tag-sh { background: #e17055; color: #fff; }
+    .tag-sz { background: #0984e3; color: #fff; }
+    .tag-bj { background: #6c5ce7; color: #fff; }
+  </style>
+</head>
+<body>
+  <!-- Header -->
+  <header class="header">
+    <h1>📊 个股深度诊断报告</h1>
+    <div class="header-actions">
+      <button class="btn btn-outline btn-sm" id="settingsBtn">⚙️ 设置</button>
+    </div>
+  </header>
+
+  <!-- Main Content -->
+  <div class="container">
+    <!-- Search -->
+    <div class="search-section">
+      <input type="text" id="searchCode" class="search-input"
+             placeholder="输入股票代码，如 000607.SZ 或 600968.SH，按 Enter 搜索"
+             autocomplete="off">
+      <button class="btn btn-primary" id="searchBtn">🔍 开始分析</button>
+      <div style="width:100%;margin-top:-4px">
+        <div class="search-hint">支持格式：000607.SZ / 600968.SH / 纯数字代码</div>
+        <div class="quick-examples">
+          <span class="quick-example" onclick="quickSearch('000607.SZ')"><span class="tag tag-sz">SZ</span>华媒控股</span>
+          <span class="quick-example" onclick="quickSearch('600968.SH')"><span class="tag tag-sh">SH</span>海油发展</span>
+          <span class="quick-example" onclick="quickSearch('000001.SZ')"><span class="tag tag-sz">SZ</span>平安银行</span>
+          <span class="quick-example" onclick="quickSearch('600519.SH')"><span class="tag tag-sh">SH</span>贵州茅台</span>
+          <span class="quick-example" onclick="quickSearch('300750.SZ')"><span class="tag tag-sz">SZ</span>宁德时代</span>
+          <span class="quick-example" onclick="quickSearch('601975.SH')"><span class="tag tag-sh">SH</span>招商南油</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Empty State -->
+    <div id="emptyState" class="empty-state">
+      <div class="icon">🔎</div>
+      <h3>输入股票代码开始分析</h3>
+      <p>系统将自动获取基本面、技术面、资金面、事件催化、同业对标、投资性价比六大维度数据，生成深度诊断报告。</p>
+      <p style="margin-top:12px;font-size:0.85rem">
+        点击上方快速示例股票试试，或直接输入你关注的股票代码
+      </p>
+    </div>
+
+    <!-- Report Area -->
+    <div id="reportArea" class="hidden"></div>
+  </div>
+
+  <!-- Loading Overlay -->
+  <div id="loadingOverlay" class="loading-overlay">
+    <div class="spinner"></div>
+    <div class="loading-text" id="loadingText">正在分析中...</div>
+  </div>
+
+  <!-- Chat Bot -->
+  <button id="chatToggle" class="chat-toggle" title="AI 答疑助手">💬</button>
+  <div id="chatPanel" class="chat-panel">
+    <div class="chat-panel-header">
+      <h4>🤖 AI 智能答疑</h4>
+      <button class="chat-close" id="chatClose">✕</button>
+    </div>
+    <div class="chat-messages" id="chatMessages">
+      <div class="chat-msg bot">
+        你好！我是股票智能答疑助手。我会基于当前分析的股票为你提供解答。
+        如果你还未配置 AI API Key，请在右上角「设置」中配置。
+        支持的 API：OpenAI / DeepSeek / 硅基流动等兼容接口。
+      </div>
+    </div>
+    <div class="chat-input-area">
+      <input type="text" id="chatInput" placeholder="输入你的问题..." autocomplete="off">
+      <button class="chat-send" id="chatSend">➤</button>
+    </div>
+  </div>
+
+  <!-- Debug Panel -->
+  <div id="debugPanel" class="debug-panel" style="display:none">
+    <div class="debug-panel-header">
+      <h4>🐛 Debug 日志</h4>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-outline btn-sm" id="debugClear">清空</button>
+        <button class="debug-close" id="debugClose">✕</button>
+      </div>
+    </div>
+    <div class="debug-messages" id="debugMessages">
+      <div class="debug-msg" style="color:var(--text-secondary)">Debug 模式已激活。LLM API 调用的完整 prompt 和响应将显示在这里。</div>
+    </div>
+  </div>
+
+  <!-- Settings Modal -->
+  <div id="settingsOverlay" class="modal-overlay">
+    <div class="modal" id="settingsModal">
+      <h2>⚙️ API 配置</h2>
+      <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:16px">
+        配置 AI 聊天功能所需的 API。股票诊断数据使用免费公开接口（无需 API Key）。
+      </p>
+
+      <div class="form-group">
+        <label>AI 提供商</label>
+        <select id="apiProvider">
+          <option value="openai">OpenAI</option>
+          <option value="deepseek">DeepSeek</option>
+          <option value="siliconflow">硅基流动 (SiliconFlow)</option>
+          <option value="custom">自定义</option>
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label>API Key <span style="color:var(--danger)">*</span></label>
+        <input type="password" id="apiKey" placeholder="sk-...">
+        <div style="font-size:0.75rem;color:var(--text-secondary);margin-top:2px">
+          推荐免费/低价方案：DeepSeek (chat.deepseek.com) 或 硅基流动 (siliconflow.cn)
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label>API Base URL</label>
+        <input type="text" id="apiBase" placeholder="https://api.openai.com/v1">
+        <div style="font-size:0.75rem;color:var(--text-secondary);margin-top:2px">
+          DeepSeek: https://api.deepseek.com/v1 | 硅基流动: https://api.siliconflow.cn/v1
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label>模型名称</label>
+        <input type="text" id="apiModel" placeholder="gpt-4o-mini">
+        <div style="font-size:0.75rem;color:var(--text-secondary);margin-top:2px">
+          DeepSeek: deepseek-chat | 硅基流动: deepseek-ai/DeepSeek-V3
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label>系统提示词（可选）</label>
+        <textarea id="systemPrompt" placeholder="自定义 AI 助手的角色设定..."></textarea>
+      </div>
+
+      <div class="test-result" id="testResult"></div>
+
+      <div class="form-group" style="margin-top:20px;padding-top:16px;border-top:1px solid var(--border)">
+        <label>🔧 Debug 模式 <span style="font-size:0.7rem;color:var(--text-secondary)">（开发者选项）</span></label>
+        <div style="display:flex;gap:8px">
+          <input type="password" id="debugPassword" placeholder="输入密码解锁" style="flex:1">
+          <button class="btn btn-outline btn-sm" id="debugUnlock">解锁</button>
+        </div>
+        <div id="debugStatus" style="font-size:0.75rem;margin-top:4px;color:var(--text-secondary)"></div>
+      </div>
+
+      <div class="modal-actions">
+        <button class="btn btn-outline" id="testChat">🔌 测试连接</button>
+        <button class="btn btn-outline" onclick="document.getElementById('settingsOverlay').classList.remove('open')">取消</button>
+        <button class="btn btn-primary" id="saveSettings">💾 保存设置</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // Quick search helper
+    function quickSearch(code) {
+      document.getElementById('searchCode').value = code;
+      document.getElementById('searchBtn').click();
+    }
+  </script>
+  <script src="/static/js/app.js?v={{ cache_buster }}"></script>
+
+  <footer style="text-align:center;padding:20px;color:var(--text-secondary);font-size:0.78rem">
+    数据来源：腾讯自选股 + 东方财富（免费公开接口）| AI 生成内容仅供参考，不构成投资建议
+  </footer>
+</body>
+</html>

@@ -24,6 +24,8 @@ os.environ["no_proxy"] = "*"
 
 # Now safe to import
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import re
 import numpy as np
 import pandas as pd
@@ -32,6 +34,17 @@ from flask import Flask, request, jsonify, render_template, send_from_directory,
 # ----- Trust no proxy: create a dedicated session that never touches system proxy settings -----
 _http_session = requests.Session()
 _http_session.trust_env = False
+
+# ----- Retry strategy: handle transient network errors (RemoteDisconnected, etc.) -----
+retry_strategy = Retry(
+    total=3,
+    backoff_factor=0.5,
+    status_forcelist=[429, 500, 502, 503, 504],
+    allowed_methods=["GET"],
+)
+adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=10, pool_maxsize=10)
+_http_session.mount("https://", adapter)
+_http_session.mount("http://", adapter)
 
 app = Flask(__name__)
 
@@ -78,9 +91,11 @@ REQ_HEADERS = {
     "Referer": "https://gu.qq.com/",
 }
 
-def _http_get(url, params=None, timeout=15):
-    """HTTP GET using trust_env=False session — never touches system proxy."""
-    return _http_session.get(url, params=params, headers=REQ_HEADERS, timeout=timeout)
+def _http_get(url, params=None, timeout=15, headers_extra=None):
+    """HTTP GET using trust_env=False session — never touches system proxy.
+    Supports extra headers for specific API endpoints."""
+    headers = {**REQ_HEADERS, **(headers_extra or {})}
+    return _http_session.get(url, params=params, headers=headers, timeout=timeout)
 
 def _tencent_code(code):
     """Convert standard code to Tencent format: sz000001, sh600519"""
@@ -349,7 +364,8 @@ def get_money_flow(code):
             "fields1": "f1,f2,f3,f7",
             "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65",
         }
-        resp = _http_get(url, params=params, timeout=15)
+        resp = _http_get(url, params=params, timeout=15,
+                         headers_extra={"Referer": "https://data.eastmoney.com/"})
         data = resp.json()
 
         if not data.get("data") or not data["data"].get("klines"):
@@ -414,7 +430,8 @@ def get_news_events(code):
             "client_source": "web",
             "stock_list": symbol,
         }
-        resp = _http_get(url, params=params, timeout=15)
+        resp = _http_get(url, params=params, timeout=15,
+                         headers_extra={"Referer": "https://data.eastmoney.com/"})
         data = resp.json()
 
         if not data.get("data") or not data["data"].get("list"):

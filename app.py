@@ -24,8 +24,6 @@ os.environ["no_proxy"] = "*"
 
 # Now safe to import
 import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 import re
 import numpy as np
 import pandas as pd
@@ -34,17 +32,6 @@ from flask import Flask, request, jsonify, render_template, send_from_directory,
 # ----- Trust no proxy: create a dedicated session that never touches system proxy settings -----
 _http_session = requests.Session()
 _http_session.trust_env = False
-
-# ----- Retry strategy: handle transient network errors (RemoteDisconnected, etc.) -----
-retry_strategy = Retry(
-    total=3,
-    backoff_factor=0.5,
-    status_forcelist=[429, 500, 502, 503, 504],
-    allowed_methods=["GET"],
-)
-adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=10, pool_maxsize=10)
-_http_session.mount("https://", adapter)
-_http_session.mount("http://", adapter)
 
 app = Flask(__name__)
 
@@ -356,7 +343,7 @@ def get_money_flow(code):
         market = "0" if code.endswith(".SZ") else "1"
         secid = f"{market}.{symbol}"
 
-        url = "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get"
+        url = "http://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get"
         params = {
             "lmt": "0",
             "klt": "1",

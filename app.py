@@ -1596,6 +1596,7 @@ def api_config():
         data = request.json
         cfg = load_config()
         if data.get("ai_chat"):
+            cfg.setdefault("ai_chat", {})
             for k in ["provider", "api_key", "api_base", "model", "system_prompt"]:
                 if k in data["ai_chat"] and data["ai_chat"][k]:
                     cfg["ai_chat"][k] = data["ai_chat"][k]

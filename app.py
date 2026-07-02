@@ -1600,8 +1600,10 @@ def index():
 def api_config():
     if request.method == "GET":
         cfg = load_config()
-        # Mask API key for security
-        cfg["ai_chat"]["api_key"] = cfg["ai_chat"]["api_key"][:8] + "****" if len(cfg["ai_chat"]["api_key"]) > 8 else "****"
+        # Mask API key for security (safe even if ai_chat or api_key missing)
+        ai_chat = cfg.get("ai_chat", {})
+        if ai_chat.get("api_key") and len(ai_chat["api_key"]) > 8:
+            ai_chat["api_key"] = ai_chat["api_key"][:8] + "****"
         return jsonify(cfg)
     else:
         data = request.json

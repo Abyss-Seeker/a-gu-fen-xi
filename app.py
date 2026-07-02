@@ -42,34 +42,18 @@ CACHE_TTL = 1800  # 30 minutes
 
 
 def load_config():
-    """Load config from config.json, with env var overrides (for Vercel deployment)."""
+    """Load config from config.json."""
     cfg = {}
     if os.path.exists(CONFIG_PATH):
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
             cfg = json.load(f)
-
-    # Environment variable overrides (Vercel / cloud deployment)
-    if os.environ.get("AI_CHAT_API_KEY"):
-        cfg.setdefault("ai_chat", {})["api_key"] = os.environ["AI_CHAT_API_KEY"]
-    if os.environ.get("AI_CHAT_API_BASE"):
-        cfg.setdefault("ai_chat", {})["api_base"] = os.environ["AI_CHAT_API_BASE"]
-    if os.environ.get("AI_CHAT_MODEL"):
-        cfg.setdefault("ai_chat", {})["model"] = os.environ["AI_CHAT_MODEL"]
-    if os.environ.get("AI_CHAT_PROVIDER"):
-        cfg.setdefault("ai_chat", {})["provider"] = os.environ["AI_CHAT_PROVIDER"]
-
     return cfg
 
 
 def save_config(cfg):
-    """Save config. On Vercel (filesystem read-only), this is a no-op;
-    use environment variables instead."""
-    try:
-        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-            json.dump(cfg, f, ensure_ascii=False, indent=2)
-    except (OSError, IOError):
-        # Read-only filesystem (e.g. Vercel) — silently skip
-        pass
+    """Save config to config.json."""
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
 
 
 def cached(key, ttl=CACHE_TTL):

@@ -177,8 +177,8 @@ def get_stock_info(code):
             "换手率": float(fields[38]) if len(fields) > 38 and fields[38] else 0,
             "市盈率-动态": float(fields[39]) if len(fields) > 39 and fields[39] else 0,
             "市净率": float(fields[46]) if len(fields) > 46 and fields[46] else 0,
-            "总市值": float(fields[44]) if len(fields) > 44 and fields[44] else 0,
-            "流通市值": float(fields[45]) if len(fields) > 45 and fields[45] else 0,
+            "总市值": float(fields[45]) if len(fields) > 45 and fields[45] else 0,
+            "流通市值": float(fields[44]) if len(fields) > 44 and fields[44] else 0,
             "成交量": int(float(fields[6])) if len(fields) > 6 and fields[6] else 0,
             "成交额": float(fields[37]) if len(fields) > 37 and fields[37] else 0,
         }

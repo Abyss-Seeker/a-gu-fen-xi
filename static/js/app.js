@@ -747,7 +747,7 @@
                     <span class="${(a.change||0) >= 0 ? 'trend-up' : 'trend-down'}">${(a.change||0) > 0 ? '+' : ''}${(a.change||0).toFixed(2)}%</span>
                   </div>
                 </div>
-                ${a.market_cap ? `<div class="alt-mcap">市值 ${(a.market_cap).toFixed(0)}亿</div>` : ''}
+                ${a.market_cap ? `<div class="alt-mcap">市值 ${(a.market_cap / 1e8).toFixed(0)}亿</div>` : ''}
                 ${realScore > 0 ? `<div class="alt-score-bar"><div class="alt-score-label">综合评分 ${recd ? '· ' + recd : ''}</div><div class="alt-score-value ${scoreCls}">${realScore}分</div></div>` : `<div class="alt-score-bar"><div class="alt-score-label" style="color:#999">评分计算中...</div></div>`}
               </div>
               <button class="btn-alt-deep" onclick="event.stopPropagation();toggleAltDeepAnalysis(${i})" title="展开对比分析">
@@ -902,7 +902,7 @@
     if (altPEG > 0 && altPEG < 0.8) { pros.push('PEG < 0.8，成长性被当前估值低估'); }
     else if (altPEG > 2) { cons.push('PEG偏高(>2)，当前估值已透支成长预期'); }
 
-    if (altMcap > 500) { pros.push('市值较大，流动性好，适合稳健配置'); }
+    if (altMcap / 1e8 > 500) { pros.push('市值较大，流动性好，适合稳健配置'); }
 
     if (cons.length === 0) cons.push('暂无明显风险点，建议进一步查看最新公告和研报');
 

@@ -1335,70 +1335,10 @@ def analyze_stock(code):
     return report
 
 
-# ---------- WeStock CLI helpers ----------
-WESTOCK_DATA_SCRIPT = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "resources", "app.asar.unpacked", "resources", "builtin-skills",
-    "westock-data", "scripts", "index.js"
-)
-# Fallback: try common install paths
-if not os.path.exists(WESTOCK_DATA_SCRIPT):
-    WESTOCK_DATA_SCRIPT = r"D:\WorkBuddy\resources\app.asar.unpacked\resources\builtin-skills\westock-data\scripts\index.js"
-
-NODE_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    ".workbuddy", "binaries", "node", "versions", "22.22.2", "node.exe"
-)
-if not os.path.exists(NODE_PATH):
-    NODE_PATH = r"C:\Users\jaspe\.workbuddy\binaries\node\versions\22.22.2\node.exe"
-
-
-def _westock(cmd_args, timeout=20):
-    """Run a westock-data CLI command and return parsed JSON (raw mode)."""
-    import subprocess
-    full_args = [NODE_PATH, WESTOCK_DATA_SCRIPT] + cmd_args + ["--raw"]
-    try:
-        result = subprocess.run(
-            full_args, capture_output=True, text=True, timeout=timeout,
-            cwd=os.path.dirname(WESTOCK_DATA_SCRIPT),
-        )
-        if result.returncode != 0:
-            return None
-        return json.loads(result.stdout)
-    except Exception as e:
-        print(f"_westock error ({cmd_args}): {e}")
-        return None
-
-
-def _find_sector(industry_name):
-    """Find westock sector code from CSRC industry name."""
-    data = _westock(["sector", "search", industry_name, "--limit", "5"])
-    if not data or not isinstance(data, list) or len(data) == 0:
-        return None, None
-    # Field names can be Chinese (代码/名称/分类) or English (Code/SectorCode/Name/Category)
-    # Prefer 申万二级 or 申万三级
-    for item in data:
-        code = item.get("代码") or item.get("Code") or item.get("SectorCode") or ""
-        name = item.get("名称") or item.get("Name") or item.get("SectorName") or ""
-        cat = item.get("分类") or item.get("Category") or ""
-        if "申万二级" in str(cat) or "申万三级" in str(cat):
-            return code, name
-    # Fallback: first result (avoid 白酒概念 etc., prefer 申万行业)
-    for item in data:
-        code = item.get("代码") or item.get("Code") or item.get("SectorCode") or ""
-        name = item.get("名称") or item.get("Name") or item.get("SectorName") or ""
-        cat = item.get("分类") or item.get("Category") or ""
-        if "申万" in str(cat):
-            return code, name
-    # Last resort
-    first = data[0]
-    code = first.get("代码") or first.get("Code") or first.get("SectorCode") or ""
-    name = first.get("名称") or first.get("Name") or first.get("SectorName") or ""
-    return code, name
 
 
 def find_alternatives(code):
-    """Find peer stocks in the same industry using westock-data sector API."""
+    """Find peer stocks in the same industry using EastMoney board API."""
     cache_key = f"alt_{code}"
     cached_val = cached(cache_key, ttl=600)
     if cached_val:
@@ -1406,166 +1346,121 @@ def find_alternatives(code):
 
     try:
         symbol = code.replace(".SZ", "").replace(".SH", "").replace(".BJ", "")
-        _tc = _tencent_code(code)
-        current_wc = _tc  # westock format: sh600519, sz000001
 
-        # 1. Get industry data
+        # 1. Get industry data to find board_code
         ind_data = get_industry_data(code)
-        ind_name = ind_data.get("industry_name", "")
+        board_code = ind_data.get("board_code", "")
         board_name = ind_data.get("board_name", "")
 
-        if not ind_name and not board_name:
+        if not board_code:
+            print(f"[find_alternatives] No board_code for {code}, skipping")
             cache_set(cache_key, [])
             return []
 
-        # 2. Build search keywords: prefer board_name, then extract from industry_name
-        search_keywords = []
-        if board_name:
-            # Clean board name: "白酒Ⅱ" -> "白酒"
-            clean_board = board_name.replace("Ⅰ", "").replace("Ⅱ", "").replace("Ⅲ", "").strip()
-            if clean_board:
-                search_keywords.append(clean_board)
-        if ind_name:
-            # CSRC industry: "制造业-酒、饮料和精制茶制造业"
-            # Extract last part after "-", or use a keyword
-            parts = ind_name.split("-")
-            last_part = parts[-1] if parts else ind_name
-            # Extract meaningful keyword (2-3 chars)
-            for kw in [last_part[:3], last_part[:2], parts[0] if len(parts) > 1 else ""]:
-                kw = kw.strip().replace("、", "").replace("和", "")
-                if kw and kw not in search_keywords and len(kw) >= 2:
-                    search_keywords.append(kw)
+        print(f"[find_alternatives] Using board {board_name} ({board_code}) for {code}")
 
-        # 3. Search for matching sector
-        sector_code = None
-        sector_name = None
-        for kw in search_keywords:
-            sector_code, sector_name = _find_sector(kw)
-            if sector_code:
-                print(f"[find_alternatives] Found sector via '{kw}': {sector_name} ({sector_code})")
-                break
+        # 2. Get board constituents via push2.eastmoney.com (HTTP to avoid TLS issues)
+        sess = requests.Session()
+        resp = sess.get(
+            "http://push2.eastmoney.com/api/qt/clist/get",
+            params={
+                "pn": 1,
+                "pz": 50,
+                "fs": f"b:{board_code}",
+                "fields": "f12,f14,f2,f9,f23,f116,f117,f5",
+            },
+            headers={"User-Agent": "Mozilla/5.0", "Referer": "https://quote.eastmoney.com/"},
+            timeout=15,
+        )
+        data = resp.json()
+        diff = data.get("data", {}).get("diff", {})
+        items = list(diff.values()) if isinstance(diff, dict) else (diff or [])
 
-        if not sector_code:
+        if not items:
+            print(f"[find_alternatives] No constituents found for board {board_code}")
             cache_set(cache_key, [])
             return []
 
-        # 4. Get all constituents
-        peers_raw = _westock(["sector", "constituent", sector_code, "--limit", "30"])
-        if not peers_raw:
-            cache_set(cache_key, [])
-            return []
+        print(f"[find_alternatives] Got {len(items)} constituents from board {board_code}")
 
-        # Parse constituents
-        peer_codes = []
-        if isinstance(peers_raw, list):
-            for p in peers_raw:
-                sc = p.get("StockCode") or p.get("code") or ""
-                if sc and sc != current_wc:
-                    peer_codes.append(sc)
-        elif isinstance(peers_raw, dict):
-            data_list = peers_raw.get("data", [])
-            if not data_list and peers_raw.get("result"):
-                data_list = peers_raw["result"].get("data", [])
-            for p in (data_list or []):
-                sc = p.get("StockCode") or p.get("code") or ""
-                if sc and sc != current_wc:
-                    peer_codes.append(sc)
-
-        print(f"[find_alternatives] Got {len(peer_codes)} peers from sector {sector_code}")
-
-        if not peer_codes:
-            cache_set(cache_key, [])
-            return []
-
-        # 5. Get quotes for all peers (batch of 10)
+        # 3. Parse and get quotes for each peer
         alternatives = []
-        for i in range(0, len(peer_codes), 10):
-            batch = peer_codes[i:i+10]
-            quotes_raw = _westock(["quote", ",".join(batch)])
-            if not quotes_raw:
+        for item in items[:20]:  # limit to 20 peers for performance
+            peer_code = str(item.get("f12", ""))
+            if not peer_code or peer_code == symbol:
+                continue
+            peer_name = item.get("f14", "")
+
+            # Determine market and full code
+            if peer_code.startswith(("6", "9")):
+                full_code = f"{peer_code}.SH"
+                wc = f"sh{peer_code}"
+            elif peer_code.startswith(("0", "3")):
+                full_code = f"{peer_code}.SZ"
+                wc = f"sz{peer_code}"
+            elif peer_code.startswith(("4", "8")):
+                full_code = f"{peer_code}.BJ"
+                wc = f"bj{peer_code}"
+            else:
                 continue
 
-            items = quotes_raw.get("data") or []
-            for item in items:
-                d = item.get("data") or item
-                if not d:
-                    continue
-                pe = d.get("pe_ratio") or 0
-                if pe is None:
-                    pe = 0
-                pe = float(pe) if pe else 0
-                pb_val = d.get("pb_ratio") or 0
-                if pb_val is None:
-                    pb_val = 0
-                pb_val = float(pb_val) if pb_val else 0
+            # Get quote via Tencent API
+            info = get_stock_info(full_code)
+            if not info or not info.get("最新价"):
+                continue
 
-                alternatives.append({
-                    "code": (d.get("code") or d.get("symbol") or "").replace("sh","").replace("sz",""),
-                    "wc": d.get("code") or d.get("symbol") or "",
-                    "name": d.get("name") or "",
-                    "price": float(d.get("price") or 0),
-                    "pe": round(pe, 2),
-                    "pb": round(pb_val, 2),
-                    "change": float(d.get("change_percent") or 0),
-                    "market_cap": float(d.get("total_market_cap") or 0),
-                    "volume": float(d.get("volume") or 0),
-                })
+            pe = info.get("市盈率-动态", 0) or 0
+            pb = info.get("市净率", 0) or 0
 
-        print(f"[find_alternatives] Got {len(alternatives)} with quotes")
+            # Skip extreme PE values
+            if pe <= 0 or pe > 200:
+                continue
 
-        # 6. Sort: prefer low positive PE, exclude extreme PE
-        valid = [a for a in alternatives if 0 < a["pe"] < 200]
-        valid.sort(key=lambda x: x["pe"])
+            alternatives.append({
+                "code": peer_code,
+                "wc": wc,
+                "name": peer_name or info.get("股票简称", ""),
+                "price": info.get("最新价", 0),
+                "pe": round(pe, 2),
+                "pb": round(pb, 2),
+                "change": info.get("涨跌幅", 0),
+                "market_cap": info.get("总市值", 0) * 1e8,  # convert 亿 to 元
+                "code_full": full_code,
+            })
 
-        # Take top 4
-        result = valid[:4]
+        if not alternatives:
+            print(f"[find_alternatives] No valid peers with quotes for {code}")
+            cache_set(cache_key, [])
+            return []
 
-        # 7. Run full analyze_stock for each to get consistent total_score
-        if result:
-            for i, a in enumerate(result):
-                wc = a.get("wc", "")
-                if wc.startswith("sh"):
-                    full_code = a["code"] + ".SH"
-                elif wc.startswith("sz"):
-                    full_code = a["code"] + ".SZ"
+        # 4. Sort by PE and take top 4
+        alternatives.sort(key=lambda x: x["pe"])
+        result = alternatives[:4]
+
+        print(f"[find_alternatives] Selected {len(result)} peers for {code}: {[a['name'] for a in result]}")
+
+        # 5. Run full analyze_stock for each to get consistent total_score
+        for i, a in enumerate(result):
+            full_code = a["code_full"]
+            try:
+                analysis = analyze_stock(full_code)
+                if analysis and "error" not in analysis:
+                    result[i]["total_score"] = analysis.get("total_score", 0)
+                    result[i]["max_score"] = analysis.get("max_score", 100)
+                    result[i]["recommendation"] = analysis.get("recommendation", "")
+                    result[i]["scores_breakdown"] = analysis.get("scores", {})
+                    result[i]["roa"] = analysis.get("roa", 0)
+                    result[i]["roe"] = (analysis.get("scores", {}).get("fundamental", {}).get("detail", {}) or {}).get("latest_roe", 0)
+                    result[i]["dividend_yield"] = (analysis.get("scores", {}).get("fundamental", {}).get("detail", {}) or {}).get("dividend_yield", 0)
+                    result[i]["peg"] = (analysis.get("scores", {}).get("value", {}).get("detail", {}) or {}).get("peg", 0)
+                    # Also get industry info
+                    raw_data = analysis.get("raw", {})
+                    result[i]["industry_board"] = (raw_data.get("industry", {}) or {}).get("board", "")
+                    print(f"[find_alternatives] {a['name']} analysis: score={analysis.get('total_score')}")
                 else:
-                    full_code = a["code"] + (".SH" if a["code"].startswith(("6","9")) else ".SZ")
-                a["code_full"] = full_code
-
-            # Run serially (each is cached internally, so 2nd time is fast)
-            for i, a in enumerate(result):
-                full_code = a["code_full"]
-                try:
-                    analysis = analyze_stock(full_code)
-                    if analysis and "error" not in analysis:
-                        result[i]["total_score"] = analysis.get("total_score", 0)
-                        result[i]["max_score"] = analysis.get("max_score", 100)
-                        result[i]["recommendation"] = analysis.get("recommendation", "")
-                        result[i]["scores_breakdown"] = analysis.get("scores", {})
-                        result[i]["roa"] = analysis.get("roa", 0)
-                        result[i]["roe"] = (analysis.get("scores", {}).get("fundamental", {}).get("detail", {}) or {}).get("latest_roe", 0)
-                        result[i]["dividend_yield"] = (analysis.get("scores", {}).get("fundamental", {}).get("detail", {}) or {}).get("dividend_yield", 0)
-                        result[i]["peg"] = (analysis.get("scores", {}).get("value", {}).get("detail", {}) or {}).get("peg", 0)
-                        # Also get industry info
-                        raw_data = analysis.get("raw", {})
-                        result[i]["industry_board"] = (raw_data.get("industry", {}) or {}).get("board", "")
-                        print(f"[find_alternatives] {a['name']} analysis: score={analysis.get('total_score')}")
-                    else:
-                        print(f"[find_alternatives] {a['name']} analysis error: {analysis.get('error', 'unknown')}")
-                except Exception as e:
-                    print(f"[find_alternatives] analyze_stock failed for {full_code}: {e}")
-
-        # Add market suffix for frontend link
-        for a in result:
-            wc = a.get("wc", "")
-            if wc.startswith("sh"):
-                a["code_full"] = a["code"] + ".SH"
-            elif wc.startswith("sz"):
-                a["code_full"] = a["code"] + ".SZ"
-            elif a["code"].startswith(("6", "9")):
-                a["code_full"] = a["code"] + ".SH"
-            else:
-                a["code_full"] = a["code"] + ".SZ"
+                    print(f"[find_alternatives] {a['name']} analysis error: {analysis.get('error', 'unknown')}")
+            except Exception as e:
+                print(f"[find_alternatives] analyze_stock failed for {full_code}: {e}")
 
         cache_set(cache_key, result)
         return result
@@ -1573,6 +1468,8 @@ def find_alternatives(code):
         print(f"Error finding alternatives: {e}")
         import traceback
         traceback.print_exc()
+        return []
+
         return []
 
 

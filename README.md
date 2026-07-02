@@ -119,39 +119,50 @@ pip install -r requirements.txt
 
 > ⚠️ **如果不配置 AI 接口**：诊断报告的基础评分和图表仍然可用，但不会生成 AI 分析文字，AI 聊天面板也无法使用。建议配置以获得完整体验。
 
-### 创建配置文件
+### 打开设置面板
 
-找到项目文件夹，新建一个文件名为 `config.json`，将以下内容复制进去：
+启动程序后，打开浏览器访问 `http://localhost:8888`，在页面右上角找到 **设置** 按钮（齿轮图标），点击打开 API 配置面板。
 
-```json
-{
-  "ai_chat": {
-    "provider": "deepseek",
-    "api_key": "你的API密钥粘贴在这里",
-    "api_base": "https://api.deepseek.com/v1",
-    "model": "deepseek-chat",
-    "system_prompt": "你是一位专业的股票投资分析师，擅长基本面分析、技术分析和投资策略。请用中文回答用户关于股票投资的问题。回答应专业、客观，包含风险提示。"
-  },
-  "data_source": {
-    "preferred": "akshare",
-    "cache_duration_minutes": 30
-  },
-  "report": {
-    "enable_ai_analysis": true,
-    "max_history_years": 5
-  }
-}
+### 逐项填写说明
+
+| 配置项 | 说明 | 必填 |
+|--------|------|------|
+| **AI 提供商** | 下拉选择，推荐选 **DeepSeek**（便宜好用） | 是 |
+| **API Key** | 从服务商官网获取的密钥，格式如 `sk-xxxxxxxx` | 是 |
+| **API Base URL** | API 的访问地址，DeepSeek 默认填 `https://api.deepseek.com/v1` | 是 |
+| **模型名称** | 具体使用的模型，DeepSeek 默认填 `deepseek-chat` | 是 |
+| **系统提示词** | 可选。定义 AI 的角色和风格，默认即可，也可自定义（见下方样例） | 否 |
+
+### 推荐服务商速查
+
+| 服务商 | 注册/获取密钥 | API Base URL | 模型名称 |
+|--------|-------------|--------------|----------|
+| **DeepSeek**（推荐） | https://platform.deepseek.com/api_keys | `https://api.deepseek.com/v1` | `deepseek-chat` |
+| **硅基流动**（国内） | https://siliconflow.cn | `https://api.siliconflow.cn/v1` | `deepseek-ai/DeepSeek-V3` |
+| **OpenAI** | https://platform.openai.com/api-keys | `https://api.openai.com/v1` | `gpt-4o` |
+
+> 💡 **省钱技巧**：DeepSeek 和硅基流动的价格远低于 OpenAI，生成一次诊断报告约消耗 1-2 毛钱。
+
+### 系统提示词样例
+
+系统提示词决定了 AI 分析的风格。以下是 3 套推荐方案，选择一套填入即可：
+
+#### 方案 A：专业投资分析师（默认推荐）
+```
+你是一位专业的股票投资分析师，擅长基本面分析、技术分析和投资策略。请用中文回答用户关于股票投资的问题。回答应专业、客观，包含风险提示。
 ```
 
-### 推荐 API 服务商
+#### 方案 B：价值投资风格
+```
+你是一位价值投资者，信奉巴菲特和芒格的投资理念。你擅长分析企业的护城河、商业模式、护城河和估值安全边际。你的回答注重长期视角，强调企业的内在价值和现金流质量，避免追逐短期热点。请用中文回答，语气沉稳、理性。
+```
 
-| 服务商 | api_key 获取地址 | 填入 api_base |
-|--------|-----------------|---------------|
-| DeepSeek（推荐，便宜） | https://platform.deepseek.com/api_keys | `https://api.deepseek.com/v1` |
-| OpenAI | https://platform.openai.com/api-keys | `https://api.openai.com/v1` |
-| 硅基流动（国内） | https://siliconflow.cn | `https://api.siliconflow.cn/v1` |
+#### 方案 C：短线/技术派风格
+```
+你是一位专注于技术分析和短线交易的投资顾问。你擅长解读 K 线形态、均线系统、MACD/KDJ 指标、量能变化和市场情绪。你关注短期市场热点和资金流向，善于捕捉趋势转折点。请用中文回答，语言简洁犀利，直接给出操作建议和风险警示。
+```
 
-只需修改 `api_key` 为你自己的密钥，其他保持不变即可。
+填完所有信息后，**向下滚动页面，点击蓝色「保存设置」按钮**。保存成功后即可使用 AI 分析功能。
 
 ---
 
@@ -193,7 +204,6 @@ http://localhost:8888
 点击搜索栏下方的快捷按钮，可以快速查看热门股票的诊断报告：
 - 贵州茅台（600519）
 - 平安银行（000001）
-- 比亚迪（002594）
 - 宁德时代（300750）
 
 ### AI 聊天
@@ -216,7 +226,13 @@ pip install -r requirements.txt
 
 ### Q: 打开网页后提示"API Key 未配置"
 
-**A:** 检查 `config.json` 是否在项目文件夹下，且格式正确，可以忽略继续使用（只是 AI 功能不可用）。
+**A:** 点击页面右上角的 **设置** 按钮（齿轮图标），检查以下配置是否正确：
+- API Key 是否已填写（不是占位符如 `sk-your-key`）
+- API Base URL 是否填写完整（以 `/v1` 结尾）
+- 模型名称是否与服务商对应
+- 确认已点击 **蓝色「保存设置」按钮**
+
+如果暂时不想配置 AI，可以直接点击「生成诊断报告」使用基础评分和图表功能（不含 AI 文字分析）。
 
 ### Q: 报告生成失败或加载不出数据
 

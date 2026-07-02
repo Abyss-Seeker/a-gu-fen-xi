@@ -107,9 +107,12 @@ REQ_HEADERS = {
     "Referer": "https://gu.qq.com/",
 }
 
-def _http_get(url, params=None, timeout=15):
+def _http_get(url, params=None, timeout=15, headers_extra=None):
     """HTTP GET using trust_env=False session — never touches system proxy."""
-    return _http_session.get(url, params=params, headers=REQ_HEADERS, timeout=timeout)
+    headers = dict(REQ_HEADERS)
+    if headers_extra:
+        headers.update(headers_extra)
+    return _http_session.get(url, params=params, headers=headers, timeout=timeout)
 
 def _tencent_code(code):
     """Convert standard code to Tencent format: sz000001, sh600519"""
@@ -1390,7 +1393,7 @@ import requests
 from urllib.parse import quote
 
 def _get_industry_peers_by_board(code):
-    """Get peer stocks using board_code via _em_fetch(). Reliable, no akshare needed."""
+    """Get peer stocks via Eastmoney push2 realtime API using board_code."""
     try:
         ind_data = get_industry_data(code)
         board_code = ind_data.get('board_code', '')
@@ -1399,27 +1402,42 @@ def _get_industry_peers_by_board(code):
             print(f"[_get_industry_peers_by_board] No board_code for {code}")
             return []
 
-        # Use Eastmoney datacenter API to get constituents
-        # Dataset: RPT_BK_ORDINARY_STOCK (industry board stocks)
-        filter_str = f'(BOARD_CODE="{board_code}")'
-        records = _em_fetch(
-            "RPT_BK_ORDINARY_STOCK",
-            "SECURITY_CODE,SECURITY_NAME_ABBR",
-            filter_str,
-            pagesize=50
+        # Use push2.eastmoney.com realtime clist API
+        url = "https://push2.eastmoney.com/api/qt/clist/get"
+        params = {
+            "pn": 1, "pz": 80,
+            "fs": f"b:{board_code}",
+            "fields": "f12,f14",
+            "fid": "f3", "po": 1,
+            "_": "1719900000000",
+        }
+        em_session = requests.Session()
+        em_session.trust_env = False
+        resp = em_session.get(
+            url, params=params,
+            headers={"User-Agent": "Mozilla/5.0", "Referer": "https://quote.eastmoney.com/"},
+            timeout=15
         )
+        data = resp.json()
 
-        if not records:
-            print(f"[_get_industry_peers_by_board] No records for board {board_code}")
+        diff = data.get("data", {}).get("diff", {})
+        if not diff:
+            print(f"[_get_industry_peers_by_board] Empty diff for board {board_code}")
             return []
+
+        # diff may be a dict {0: {...}, 1: {...}} or a list
+        if isinstance(diff, dict):
+            items = list(diff.values())
+        else:
+            items = diff
 
         symbol = code.replace('.SZ', '').replace('.SH', '').replace('.BJ', '')
         peers = []
-        for rec in records:
-            c = str(rec.get('SECURITY_CODE', '')).zfill(6)
+        for item in items:
+            c = str(item.get('f12', '')).zfill(6)
             if c == symbol:
                 continue
-            n = rec.get('SECURITY_NAME_ABBR', '')
+            n = item.get('f14', '')
             wc = 'sh' + c if c.startswith(('6', '9')) else 'sz' + c
             peers.append({'code': c, 'name': n, 'wc': wc})
 

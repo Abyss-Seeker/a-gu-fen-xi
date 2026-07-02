@@ -373,7 +373,7 @@ def get_money_flow(code):
         market = "0" if code.endswith(".SZ") else "1"
         secid = f"{market}.{symbol}"
 
-        url = "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get"
+        url = "http://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get"
         params = {
             "lmt": "0",
             "klt": "1",

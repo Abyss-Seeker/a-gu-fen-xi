@@ -1247,14 +1247,14 @@ body {
 .alt-llm-info:hover { color: #3b82f6; }
 .alt-llm-popup {
   position: absolute;
-  top: 100%;
+  bottom: 100%;
   right: 0;
-  margin-top: 8px;
+  margin-bottom: 8px;
   background: #fff;
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  box-shadow: 0 8px 24px rgba(0,0,0,0.12);
-  z-index: 1000;
+  box-shadow: 0 -4px 24px rgba(0,0,0,0.12);
+  z-index: 10000;
   max-width: 300px;
   min-width: 240px;
 }

@@ -3419,38 +3419,186 @@ def deep_cache_clear():
 _STOCK_LIST_CACHE = None
 _STOCK_LIST_CACHE_TIME = 0
 
-def _build_pinyin_initials(name):
-    """Extract pinyin initials for Chinese stock names using a minimal mapping.
-    Returns lowercase string of initials (e.g., '贵州茅台' → 'gzmt')."""
-    # Common first-character pinyin mapping for Chinese stock name characters
-    _PINYIN_MAP = {
-        '安': 'a', '白': 'b', '宝': 'b', '北': 'b', '本': 'b', '比': 'b', '博': 'b',
-        '长': 'c', '成': 'c', '城': 'c', '创': 'c', '川': 'c', '传': 'c', '船': 'c',
-        '大': 'd', '电': 'd', '东': 'd', '地': 'd', '达': 'd', '迪': 'd', '德': 'd',
-        '鄂': 'e', '恩': 'e',
-        '方': 'f', '风': 'f', '福': 'f', '富': 'f', '飞': 'f', '复': 'f',
-        '工': 'g', '国': 'g', '广': 'g', '高': 'g', '格': 'g', '贵': 'g', '公': 'g',
-        '海': 'h', '华': 'h', '恒': 'h', '航': 'h', '合': 'h', '河': 'h', '化': 'h', '惠': 'h',
-        '机': 'j', '建': 'j', '金': 'j', '交': 'j', '家': 'j', '京': 'j', '酒': 'j', '军': 'j',
-        '科': 'k', '康': 'k', '凯': 'k',
-        '联': 'l', '老': 'l', '龙': 'l', '利': 'l', '林': 'l', '泸': 'l', '路': 'l', '绿': 'l',
-        '美': 'm', '民': 'm', '明': 'm', '牡': 'm',
-        '宁': 'n', '南': 'n', '能': 'n', '农': 'n',
-        '平': 'p', '浦': 'p', '普': 'p',
-        '汽': 'q', '青': 'q', '全': 'q',
-        '人': 'r', '日': 'r', '瑞': 'r',
-        '上': 's', '深': 's', '石': 's', '世': 's', '三': 's', '生': 's', '数': 's', '水': 's',
-        '天': 't', '通': 't', '太': 't', '台': 't', '泰': 't',
-        '万': 'w', '五': 'w', '物': 'w', '芜': 'w', '网': 'w', '潍': 'w',
-        '新': 'x', '西': 'x', '兴': 'x', '信': 'x', '星': 'x', '小': 'x', '厦': 'x', '协': 'x',
-        '一': 'y', '银': 'y', '洋': 'y', '医': 'y', '云': 'y', '运': 'y', '有': 'y', '药': 'y', '易': 'y',
-        '中': 'z', '招': 'z', '重': 'z', '证': 'z', '智': 'z', '紫': 'z', '正': 'z', '张': 'z',
-    }
-    result = []
+# Comprehensive pinyin mapping for A-share stock name characters
+# Each entry: char → (initial, full_pinyin)
+_PINYIN_FULL = {
+    # --- A -- -
+    '安': ('a', 'an'), '爱': ('a', 'ai'), '奥': ('a', 'ao'),
+    # --- B -- -
+    '白': ('b', 'bai'), '宝': ('b', 'bao'), '北': ('b', 'bei'), '本': ('b', 'ben'),
+    '比': ('b', 'bi'), '博': ('b', 'bo'), '邦': ('b', 'bang'), '步': ('b', 'bu'),
+    '百': ('b', 'bai'), '玻': ('b', 'bo'), '滨': ('b', 'bin'), '保': ('b', 'bao'),
+    '贝': ('b', 'bei'), '碧': ('b', 'bi'), '八': ('b', 'ba'), '巴': ('b', 'ba'),
+    '波': ('b', 'bo'), '榜': ('b', 'bang'), '包': ('b', 'bao'), '标': ('b', 'biao'),
+    # --- C -- -
+    '长': ('c', 'chang'), '成': ('c', 'cheng'), '城': ('c', 'cheng'), '创': ('c', 'chuang'),
+    '川': ('c', 'chuan'), '传': ('c', 'chuan'), '船': ('c', 'chuan'), '材': ('c', 'cai'),
+    '产': ('c', 'chan'), '车': ('c', 'che'), '晨': ('c', 'chen'), '辰': ('c', 'chen'),
+    '财': ('c', 'cai'), '储': ('c', 'chu'), '慈': ('c', 'ci'), '磁': ('c', 'ci'),
+    # --- D -- -
+    '大': ('d', 'da'), '电': ('d', 'dian'), '东': ('d', 'dong'), '地': ('d', 'di'),
+    '达': ('d', 'da'), '迪': ('d', 'di'), '德': ('d', 'de'), '动': ('d', 'dong'),
+    '道': ('d', 'dao'), '第': ('d', 'di'), '鼎': ('d', 'ding'), '端': ('d', 'duan'),
+    '豆': ('d', 'dou'), '丹': ('d', 'dan'), '盾': ('d', 'dun'), '戴': ('d', 'dai'),
+    # --- E -- -
+    '鄂': ('e', 'e'), '恩': ('e', 'en'), '尔': ('e', 'er'),
+    # --- F -- -
+    '方': ('f', 'fang'), '风': ('f', 'feng'), '福': ('f', 'fu'), '富': ('f', 'fu'),
+    '飞': ('f', 'fei'), '复': ('f', 'fu'), '发': ('f', 'fa'), '纺': ('f', 'fang'),
+    '服': ('f', 'fu'), '房': ('f', 'fang'), '分': ('f', 'fen'), '峰': ('f', 'feng'),
+    # --- G -- -
+    '工': ('g', 'gong'), '国': ('g', 'guo'), '广': ('g', 'guang'), '高': ('g', 'gao'),
+    '格': ('g', 'ge'), '贵': ('g', 'gui'), '公': ('g', 'gong'), '股': ('g', 'gu'),
+    '钢': ('g', 'gang'), '光': ('g', 'guang'), '港': ('g', 'gang'), '古': ('g', 'gu'),
+    '关': ('g', 'guan'), '冠': ('g', 'guan'), '观': ('g', 'guan'), '管': ('g', 'guan'),
+    '硅': ('g', 'gui'), '轨': ('g', 'gui'), '歌': ('g', 'ge'), '谷': ('g', 'gu'),
+    '供': ('g', 'gong'), '甘': ('g', 'gan'), '干': ('g', 'gan'), '赣': ('g', 'gan'),
+    # --- H -- -
+    '海': ('h', 'hai'), '华': ('h', 'hua'), '恒': ('h', 'heng'), '航': ('h', 'hang'),
+    '合': ('h', 'he'), '河': ('h', 'he'), '化': ('h', 'hua'), '惠': ('h', 'hui'),
+    '湖': ('h', 'hu'), '好': ('h', 'hao'), '环': ('h', 'huan'), '沪': ('h', 'hu'),
+    '鸿': ('h', 'hong'), '宏': ('h', 'hong'), '红': ('h', 'hong'), '回': ('h', 'hui'),
+    '互': ('h', 'hu'), '花': ('h', 'hua'), '欢': ('h', 'huan'), '汉': ('h', 'han'),
+    '杭': ('h', 'hang'), '皇': ('h', 'huang'), '禾': ('h', 'he'), '汇': ('h', 'hui'),
+    '和': ('h', 'he'), '浩': ('h', 'hao'), '黑': ('h', 'hei'), '哈': ('h', 'ha'),
+    '辉': ('h', 'hui'), '火': ('h', 'huo'),
+    # --- J -- -
+    '机': ('j', 'ji'), '建': ('j', 'jian'), '金': ('j', 'jin'), '交': ('j', 'jiao'),
+    '家': ('j', 'jia'), '京': ('j', 'jing'), '酒': ('j', 'jiu'), '军': ('j', 'jun'),
+    '技': ('j', 'ji'), '集': ('j', 'ji'), '健': ('j', 'jian'), '江': ('j', 'jiang'),
+    '九': ('j', 'jiu'), '精': ('j', 'jing'), '晶': ('j', 'jing'), '君': ('j', 'jun'),
+    '景': ('j', 'jing'), '炬': ('j', 'ju'), '加': ('j', 'jia'), '嘉': ('j', 'jia'),
+    '节': ('j', 'jie'), '杰': ('j', 'jie'), '教': ('j', 'jiao'), '基': ('j', 'ji'),
+    '洁': ('j', 'jie'), '锦': ('j', 'jin'), '井': ('j', 'jing'), '进': ('j', 'jin'),
+    '吉': ('j', 'ji'), '均': ('j', 'jun'), '巨': ('j', 'ju'), '经': ('j', 'jing'),
+    # --- K -- -
+    '科': ('k', 'ke'), '康': ('k', 'kang'), '凯': ('k', 'kai'), '开': ('k', 'kai'),
+    '控': ('k', 'kong'), '口': ('k', 'kou'), '矿': ('k', 'kuang'), '空': ('k', 'kong'),
+    '扩': ('k', 'kuo'), '垦': ('k', 'ken'), '酷': ('k', 'ku'), '快': ('k', 'kuai'),
+    # --- L -- -
+    '联': ('l', 'lian'), '老': ('l', 'lao'), '龙': ('l', 'long'), '利': ('l', 'li'),
+    '林': ('l', 'lin'), '泸': ('l', 'lu'), '路': ('l', 'lu'), '绿': ('l', 'lü'),
+    '蓝': ('l', 'lan'), '领': ('l', 'ling'), '隆': ('l', 'long'), '洛': ('l', 'luo'),
+    '鲁': ('l', 'lu'), '力': ('l', 'li'), '流': ('l', 'liu'), '拉': ('l', 'la'),
+    '来': ('l', 'lai'), '乐': ('l', 'le'), '量': ('l', 'liang'), '零': ('l', 'ling'),
+    '六': ('l', 'liu'), '临': ('l', 'lin'), '理': ('l', 'li'), '丽': ('l', 'li'),
+    '锂': ('l', 'li'), '铝': ('l', 'lü'), '兰': ('l', 'lan'), '良': ('l', 'liang'),
+    # --- M -- -
+    '美': ('m', 'mei'), '民': ('m', 'min'), '明': ('m', 'ming'), '牡': ('m', 'mu'),
+    '煤': ('m', 'mei'), '蒙': ('m', 'meng'), '曼': ('m', 'man'), '名': ('m', 'ming'),
+    '模': ('m', 'mo'), '摩': ('m', 'mo'), '幕': ('m', 'mu'), '迈': ('m', 'mai'),
+    '码': ('m', 'ma'), '密': ('m', 'mi'), '茅': ('m', 'mao'),
+    # --- N -- -
+    '宁': ('n', 'ning'), '南': ('n', 'nan'), '能': ('n', 'neng'), '农': ('n', 'nong'),
+    '内': ('n', 'nei'), '纳': ('n', 'na'), '男': ('n', 'nan'),
+    # --- P -- -
+    '平': ('p', 'ping'), '浦': ('p', 'pu'), '普': ('p', 'pu'), '品': ('p', 'pin'),
+    '片': ('p', 'pian'), '牌': ('p', 'pai'),
+    # --- Q -- -
+    '汽': ('q', 'qi'), '青': ('q', 'qing'), '全': ('q', 'quan'), '券': ('q', 'quan'),
+    '泉': ('q', 'quan'), '区': ('q', 'qu'), '旗': ('q', 'qi'), '强': ('q', 'qiang'),
+    '轻': ('q', 'qing'), '铅': ('q', 'qian'), '奇': ('q', 'qi'), '球': ('q', 'qiu'),
+    '氢': ('q', 'qing'), '前': ('q', 'qian'), '企': ('q', 'qi'), '千': ('q', 'qian'),
+    # --- R -- -
+    '人': ('r', 'ren'), '日': ('r', 'ri'), '瑞': ('r', 'rui'), '软': ('r', 'ruan'),
+    '荣': ('r', 'rong'), '融': ('r', 'rong'), '润': ('r', 'run'), '燃': ('r', 'ran'),
+    # --- S -- -
+    '上': ('s', 'shang'), '深': ('s', 'shen'), '石': ('s', 'shi'), '世': ('s', 'shi'),
+    '三': ('s', 'san'), '生': ('s', 'sheng'), '数': ('s', 'shu'), '水': ('s', 'shui'),
+    '商': ('s', 'shang'), '实': ('s', 'shi'), '设': ('s', 'she'), '山': ('s', 'shan'),
+    '苏': ('s', 'su'), '神': ('s', 'shen'), '沙': ('s', 'sha'), '食': ('s', 'shi'),
+    '双': ('s', 'shuang'), '塑': ('s', 'su'), '首': ('s', 'shou'), '顺': ('s', 'shun'),
+    '申': ('s', 'shen'), '省': ('s', 'sheng'), '盛': ('s', 'sheng'), '胜': ('s', 'sheng'),
+    '四': ('s', 'si'), '松': ('s', 'song'), '丝': ('s', 'si'), '穗': ('s', 'sui'),
+    # --- T -- -
+    '天': ('t', 'tian'), '通': ('t', 'tong'), '太': ('t', 'tai'), '台': ('t', 'tai'),
+    '泰': ('t', 'tai'), '铁': ('t', 'tie'), '投': ('t', 'tou'), '同': ('t', 'tong'),
+    '拓': ('t', 'tuo'), '团': ('t', 'tuan'), '特': ('t', 'te'), '塔': ('t', 'ta'),
+    '唐': ('t', 'tang'), '太': ('t', 'tai'), '铜': ('t', 'tong'), '腾': ('t', 'teng'),
+    '太': ('t', 'tai'),
+    # --- W -- -
+    '万': ('w', 'wan'), '五': ('w', 'wu'), '物': ('w', 'wu'), '芜': ('w', 'wu'),
+    '网': ('w', 'wang'), '潍': ('w', 'wei'), '文': ('w', 'wen'), '维': ('w', 'wei'),
+    '微': ('w', 'wei'), '无': ('w', 'wu'), '武': ('w', 'wu'), '伟': ('w', 'wei'),
+    '旺': ('w', 'wang'), '威': ('w', 'wei'), '卫': ('w', 'wei'), '温': ('w', 'wen'),
+    '唯': ('w', 'wei'), '外': ('w', 'wai'), '玩': ('w', 'wan'),
+    # --- X -- -
+    '新': ('x', 'xin'), '西': ('x', 'xi'), '兴': ('x', 'xing'), '信': ('x', 'xin'),
+    '星': ('x', 'xing'), '小': ('x', 'xiao'), '厦': ('x', 'xia'), '协': ('x', 'xie'),
+    '学': ('x', 'xue'), '希': ('x', 'xi'), '秀': ('x', 'xiu'), '芯': ('x', 'xin'),
+    '选': ('x', 'xuan'), '销': ('x', 'xiao'), '新': ('x', 'xin'), '许': ('x', 'xu'),
+    '锡': ('x', 'xi'), '祥': ('x', 'xiang'), '先': ('x', 'xian'), '雪': ('x', 'xue'),
+    '现': ('x', 'xian'), '香': ('x', 'xiang'), '湘': ('x', 'xiang'), '翔': ('x', 'xiang'),
+    '效': ('x', 'xiao'), '消': ('x', 'xiao'),
+    # --- Y -- -
+    '一': ('y', 'yi'), '银': ('y', 'yin'), '洋': ('y', 'yang'), '医': ('y', 'yi'),
+    '云': ('y', 'yun'), '运': ('y', 'yun'), '有': ('y', 'you'), '药': ('y', 'yao'),
+    '易': ('y', 'yi'), '阳': ('y', 'yang'), '亚': ('y', 'ya'), '因': ('y', 'yin'),
+    '园': ('y', 'yuan'), '亿': ('y', 'yi'), '永': ('y', 'yong'), '烟': ('y', 'yan'),
+    '医': ('y', 'yi'), '延': ('y', 'yan'), '英': ('y', 'ying'), '娱': ('y', 'yu'),
+    '元': ('y', 'yuan'), '远': ('y', 'yuan'), '粤': ('y', 'yue'), '越': ('y', 'yue'),
+    '沿': ('y', 'yan'), '优': ('y', 'you'), '盈': ('y', 'ying'), '宇': ('y', 'yu'),
+    '饮': ('y', 'yin'), '液': ('y', 'ye'), '业': ('y', 'ye'), '研': ('y', 'yan'),
+    # --- Z -- -
+    '中': ('z', 'zhong'), '招': ('z', 'zhao'), '重': ('z', 'zhong'), '证': ('z', 'zheng'),
+    '智': ('z', 'zhi'), '紫': ('z', 'zi'), '正': ('z', 'zheng'), '张': ('z', 'zhang'),
+    '制': ('z', 'zhi'), '站': ('z', 'zhan'), '展': ('z', 'zhan'), '振': ('z', 'zhen'),
+    '住': ('z', 'zhu'), '装': ('z', 'zhuang'), '浙': ('z', 'zhe'), '珠': ('z', 'zhu'),
+    '自': ('z', 'zi'), '总': ('z', 'zong'), '知': ('z', 'zhi'), '兆': ('z', 'zhao'),
+    '卓': ('z', 'zhuo'), '尊': ('z', 'zun'), '庄': ('z', 'zhuang'), '洲': ('z', 'zhou'),
+    '志': ('z', 'zhi'), '纸': ('z', 'zhi'), '之': ('z', 'zhi'), '轴': ('z', 'zhou'),
+    '众': ('z', 'zhong'), '泽': ('z', 'ze'), '筑': ('z', 'zhu'), '周': ('z', 'zhou'),
+    '专': ('z', 'zhuan'), '子': ('z', 'zi'), '资': ('z', 'zi'),
+    # --- Additional common stock name characters ---
+    '州': ('z', 'zhou'), '的': ('d', 'de'), '行': ('h', 'hang'),
+    '视': ('s', 'shi'), '伊': ('y', 'yi'), '井': ('j', 'jing'),
+    '窖': ('j', 'jiao'), '田': ('t', 'tian'), '贡': ('g', 'gong'),
+    '司': ('s', 'si'), '味': ('w', 'wei'), '份': ('f', 'fen'),
+    '业': ('y', 'ye'), '黄': ('h', 'huang'), '移': ('y', 'yi'),
+    '讯': ('x', 'xun'), '秦': ('q', 'qin'), '介': ('j', 'jie'),
+    '源': ('y', 'yuan'), '药': ('y', 'yao'), '牧': ('m', 'mu'),
+    '峰': ('f', 'feng'), '锋': ('f', 'feng'), '望': ('w', 'wang'),
+    '超': ('c', 'chao'), '夏': ('x', 'xia'), '媒': ('m', 'mei'),
+    '场': ('c', 'chang'), '果': ('g', 'guo'), '时': ('s', 'shi'),
+    '境': ('j', 'jing'), '解': ('j', 'jie'), '粮': ('l', 'liang'),
+    '络': ('l', 'luo'), '线': ('x', 'xian'), '酒': ('j', 'jiu'),
+    '稀': ('x', 'xi'), '土': ('t', 'tu'), '原': ('y', 'yuan'),
+    '石': ('s', 'shi'), '油': ('y', 'you'), '气': ('q', 'qi'),
+    '焦': ('j', 'jiao'), '炭': ('t', 'tan'), '纸': ('z', 'zhi'),
+    '饮': ('y', 'yin'), '料': ('l', 'liao'), '食': ('s', 'shi'),
+    '品': ('p', 'pin'), '房': ('f', 'fang'), '地': ('d', 'di'),
+    '产': ('c', 'chan'), '建': ('j', 'jian'), '筑': ('z', 'zhu'),
+    '寿': ('s', 'shou'), '险': ('x', 'xian'), '秦': ('q', 'qin'),
+    '鞍': ('a', 'an'), '钢': ('g', 'gang'), '铁': ('t', 'tie'),
+    '煤': ('m', 'mei'), '炭': ('t', 'tan'), '烯': ('x', 'xi'),
+    '顶': ('d', 'ding'), '集': ('j', 'ji'), '团': ('t', 'tuan'),
+    '控': ('k', 'kong'), '股': ('g', 'gu'), '有': ('y', 'you'),
+    '限': ('x', 'xian'), '公': ('g', 'gong'), '司': ('s', 'si'),
+    '馆': ('g', 'guan'), '园': ('y', 'yuan'), '地': ('d', 'di'),
+}
+
+
+def _build_pinyin_info(name):
+    """Build pinyin data for a Chinese stock name.
+    Returns dict with:
+      - initials: concatenated first letters (e.g., '贵州茅台' → 'gzmt')
+      - full: concatenated full pinyin (e.g., '贵州茅台' → 'guizhoumaotai')
+      - full_compact: full pinyin without tone marks
+    """
+    initials = []
+    full = []
     for ch in name:
-        if ch in _PINYIN_MAP:
-            result.append(_PINYIN_MAP[ch])
-    return ''.join(result)
+        p = _PINYIN_FULL.get(ch)
+        if p:
+            initials.append(p[0])
+            full.append(p[1])
+        else:
+            # Unknown character: just use the character itself for full, skip initial
+            full.append(ch)
+    return {
+        'initials': ''.join(initials),
+        'full': ''.join(full),
+    }
 
 
 def _get_stock_list():
@@ -3472,7 +3620,7 @@ def _get_stock_list():
             "fields": "f12,f14",
             "po": "1",
         }
-        resp = _http_get(EM_DATACENTER.replace("/securities/api/data/v1/get", "/api/qt/clist/get"),
+        resp = _http_get("https://push2.eastmoney.com/api/qt/clist/get",
                          params=params, timeout=15)
         data = resp.json()
         stocks_data = data.get("data", {}).get("diff", [])
@@ -3482,11 +3630,13 @@ def _get_stock_list():
                 name = s.get("f14", "")
                 if code and name:
                     suffix = ".SH" if code.startswith("6") else (".BJ" if code.startswith("8") else ".SZ")
+                    pinyin_info = _build_pinyin_info(name)
                     result.append({
                         "code": code,
                         "name": name,
                         "code_full": code + suffix,
-                        "pinyin": _build_pinyin_initials(name),
+                        "pinyin": pinyin_info["initials"],
+                        "pinyin_full": pinyin_info["full"],
                     })
             print(f"[stock_list] EastMoney: {len(result)} stocks")
     except Exception as e:
@@ -3501,11 +3651,13 @@ def _get_stock_list():
                 if c not in seen:
                     seen.add(c)
                     suffix = ".SH" if c.startswith("6") else ".SZ"
+                    pinyin_info = _build_pinyin_info(n)
                     result.append({
                         "code": c,
                         "name": n,
                         "code_full": c + suffix,
-                        "pinyin": _build_pinyin_initials(n),
+                        "pinyin": pinyin_info["initials"],
+                        "pinyin_full": pinyin_info["full"],
                     })
         print(f"[stock_list] Static fallback: {len(result)} stocks")
 
@@ -3524,37 +3676,65 @@ def search_stocks():
     stock_list = _get_stock_list()
     q_lower = q.lower()
 
-    # Score each stock: exact code match > code prefix > name match > pinyin match
+    # Score each stock with multi-level fuzzy matching
     scored = []
     for s in stock_list:
         score = 0
         code = s["code"]
         name = s["name"]
-        pin = s["pinyin"]
+        name_lower = name.lower()
+        pin = s.get("pinyin", "")
+        pin_full = s.get("pinyin_full", "")
 
-        # Code exact match (highest priority)
+        # --- Code matching ---
         if code == q_lower:
-            score = 1000
-        # Code prefix match
+            score = max(score, 1000)
         elif code.startswith(q_lower):
-            score = 800 + (10 - len(code))  # shorter codes get higher priority
-        # Code contains
+            score = max(score, 800)
         elif q_lower in code:
-            score = 600
+            score = max(score, 600)
 
-        # Name exact match
+        # --- Name matching ---
         if name == q:
-            score = max(score, 900)
-        # Name starts with query
+            score = max(score, 950)
         elif name.startswith(q):
             score = max(score, 700)
-        # Name contains
-        elif q_lower in name.lower():
+        elif q_lower in name_lower:
             score = max(score, 500)
 
-        # Pinyin match
+        # --- Non-contiguous name matching: check if all query chars appear in order ---
+        # e.g., "光股" → "阳光股份" (光 at pos1, 股 at pos2, in order)
+        if len(q) >= 2 and score < 500:
+            pos = 0
+            match = True
+            for ch in q:
+                idx = name.find(ch, pos)
+                if idx == -1:
+                    match = False
+                    break
+                pos = idx + 1
+            if match and q_lower not in name_lower:
+                score = max(score, 350)
+
+        # --- Pinyin initials matching (e.g., "htzq" → "海通证券") ---
         if pin and q_lower in pin:
             score = max(score, 400)
+
+        # --- Full pinyin matching (e.g., "huatai" → "华泰证券") ---
+        if pin_full and q_lower in pin_full:
+            score = max(score, 420)
+
+        # --- Compound pinyin matching: split query by known pinyin boundaries ---
+        # e.g., "haitong" → matches name starting with "海通"
+        if pin_full and len(q_lower) >= 3 and q_lower not in pin_full and q_lower not in (pin or ''):
+            # Try checking if each char of the query appears neatly in the full pinyin
+            sub_match = True
+            test_pos = 0
+            for ch in pin_full:
+                if test_pos < len(q_lower) and ch == q_lower[test_pos]:
+                    test_pos += 1
+            if test_pos >= len(q_lower) * 0.7:  # 70% of chars matched
+                score = max(score, 300)
 
         if score > 0:
             scored.append((score, s))

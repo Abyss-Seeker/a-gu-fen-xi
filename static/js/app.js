@@ -755,8 +755,35 @@
 
     var prices = report.prices_data || [];
     if (prices.length < 10) {
-      chartDom.innerHTML = '<p style="color:#999;text-align:center;padding:40px">K线数据不足</p>';
+      chartDom.innerHTML = '<p style="color:#999;text-align:center;padding:40px">K线数据不足（' + prices.length + '条）</p>';
       return;
+    }
+
+    // ---- Data diagnostic logging ----
+    console.log('%c[K线] 数据诊断', 'font-weight:bold;color:#3b82f6',
+      '共', prices.length, '条K线 |',
+      '首条:', prices[0]['日期'], '开' + prices[0]['开盘'], '收' + prices[0]['收盘'],
+      '| 末条:', prices[prices.length-1]['日期'], '开' + prices[prices.length-1]['开盘'], '收' + prices[prices.length-1]['收盘']);
+
+    // Check for any anomalous bars
+    var badBars = [];
+    for (var bi = 0; bi < prices.length; bi++) {
+      var bar = prices[bi];
+      var o = parseFloat(bar['开盘']) || 0;
+      var c = parseFloat(bar['收盘']) || 0;
+      var h = parseFloat(bar['最高']) || 0;
+      var l = parseFloat(bar['最低']) || 0;
+      if (h < l || h < Math.max(o, c) - 0.001 || l > Math.min(o, c) + 0.001) {
+        badBars.push({i: bi, date: bar['日期'], o: o, c: c, h: h, l: l});
+      }
+    }
+    if (badBars.length > 0) {
+      console.warn('%c[K线] ⚠️ ' + badBars.length + ' 条异常OHLC数据:', 'color:#ff4444');
+      badBars.slice(0, 5).forEach(function(b) {
+        console.warn('  [' + b.i + '] ' + b.date + ' 开=' + b.o + ' 收=' + b.c + ' 高=' + b.h + ' 低=' + b.l);
+      });
+    } else {
+      console.log('%c[K线] ✅ 全部' + prices.length + '条OHLC数据合法', 'color:#44bb44');
     }
 
     // Ensure chart instance is disposed before creating new one
@@ -933,6 +960,14 @@
         }
       ].concat(maSeries)
     };
+
+    // Verify ECharts OHLC format: [open, close, lowest, highest]
+    console.log('%c[K线] ECharts OHLC样本 (最新5条):', 'color:#3b82f6');
+    for (var si = Math.max(0, ohlc.length - 5); si < ohlc.length; si++) {
+      var s = ohlc[si];
+      console.log('  [' + dates[si] + '] open=' + s[0] + ' close=' + s[1] + ' low=' + s[2] + ' high=' + s[3] +
+        ' | volume=' + (volumes[si] ? volumes[si][1] : '?'));
+    }
 
     chart.setOption(option);
 

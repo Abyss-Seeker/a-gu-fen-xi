@@ -1596,12 +1596,17 @@
     panel.style.display = 'block';
     if (arrow) arrow.textContent = '▴';
 
-    // Check cache first
-    if (_altDeepCache[cacheKey]) {
+    // Check cache first — but skip if it was a no-LLM skim (empty sections)
+    var cachedEntry = _altDeepCache[cacheKey];
+    if (cachedEntry && !(cachedEntry.completed && !cachedEntry.sections.score_analysis && !cachedEntry.sections.financial_analysis)) {
       console.log('%c[Alt Deep] 命中缓存，自动展开 ' + cacheKey, 'color:#44bb44');
-      _renderDeepCacheToPanel(panel, _altDeepCache[cacheKey], index);
+      _renderDeepCacheToPanel(panel, cachedEntry, index);
       if (arrow) arrow.textContent = '▴';
       return;
+    }
+    if (cachedEntry) {
+      console.log('%c[Alt Deep] 缓存为无LLM版本，重新执行完整分析', 'color:#f59e0b');
+      delete _altDeepCache[cacheKey];
     }
 
     // Build rule-based HTML
@@ -1609,16 +1614,9 @@
     html = html.replace(/INDEX_PLACEHOLDER/g, index);
     panel.innerHTML = html;
 
-    // Init cache: store rule-based HTML + empty sections for LLM content
-    _altDeepCache[cacheKey] = {
-      html: html,
-      sections: { score_analysis: '', financial_analysis: '', debate_analysis: '', verdict: '' },
-      completed: _altNoLLM  // if LLM disabled, mark immediately as complete (no sections)
-    };
-
-    // If LLM is disabled, show skip note and stop here
+    // If LLM is disabled, show skip note and stop here — do NOT cache
     if (_altNoLLM) {
-      console.log('%c[Alt Deep] LLM已禁用，仅显示规则对比', 'color:#f59e0b');
+      console.log('%c[Alt Deep] LLM已禁用，仅显示规则对比（不缓存）', 'color:#f59e0b');
       var llmSecIds = { score_analysis: 'altAiScore_', financial_analysis: 'altAiFinance_',
                         debate_analysis: 'altAiDebate_', verdict: 'altAiVerdict_' };
       for (var sk in llmSecIds) {
@@ -1627,6 +1625,13 @@
       }
       return;
     }
+
+    // Init cache only when LLM is enabled
+    _altDeepCache[cacheKey] = {
+      html: html,
+      sections: { score_analysis: '', financial_analysis: '', debate_analysis: '', verdict: '' },
+      completed: false
+    };
 
     // Start AI streaming comparison (updates cache.sections and DOM in parallel)
     fetchAltDeepCompareStream(index, alt, currentReport);

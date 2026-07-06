@@ -823,6 +823,13 @@ body {
   transition: background 0.2s;
 }
 .btn-alt-deep:hover { background: linear-gradient(135deg, #e8f4fd, #d0e8ff); }
+.btn-alt-deep.disabled {
+  background: #f1f2f6;
+  color: #b0b8c1;
+  cursor: not-allowed;
+  pointer-events: none;
+  opacity: 0.6;
+}
 .alt-deep-arrow { font-size: 0.7rem; transition: transform 0.2s; }
 
 .alt-deep-panel {

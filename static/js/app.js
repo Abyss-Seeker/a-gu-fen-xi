@@ -1024,6 +1024,7 @@
   let _altDataCache = [];
   let _altCache = { industry: [], price_similar: [], recommended: [], _loaded: false };
   let _altActiveMode = 'industry';
+  let _altDeepCache = {};  // deep comparison cache: "code1_code2" → {html, streamHtml}
 
   /**
    * Log API fallback info to browser console with color coding.
@@ -1089,6 +1090,7 @@
     _altActiveMode = 'industry';
     _altFullScores = {};
     _altScoreLoadState = 'idle';
+    _altDeepCache = {};  // reset deep comparison cache for new stock
     updateAltTabUI();
 
     // Clear old content immediately — show loading
@@ -1194,10 +1196,23 @@
           var scoreData = await scoreResp.json();
           var sc = scoreData.scores || [];
 
-          // Store full scores
+          // Store full scores and merge into alt cache for deep analysis
           sc.forEach(function(s) {
             if (s.source === 'full' && s.total_score > 0) {
               _altFullScores[s.code] = s;
+              // Merge into all three mode caches so deep analysis has full data
+              ['industry', 'price_similar', 'recommended'].forEach(function(mode) {
+                (_altCache[mode] || []).forEach(function(a) {
+                  var afc = a.code_full || (a.code && a.code.startsWith('6') ? a.code + '.SH' : a.code + '.SZ');
+                  if (afc === s.code || a.code + '.SZ' === s.code || a.code + '.SH' === s.code) {
+                    a.total_score = s.total_score;
+                    a.recommendation = s.recommendation;
+                    a.scores_breakdown = s.scores_breakdown;
+                    a.roe = s.roe || 0;
+                    a.dividend_yield = s.dividend_yield || 0;
+                  }
+                });
+              });
             }
           });
 
@@ -1336,6 +1351,7 @@
    * Manual cache clear — reloads alternatives
    */
   async function clearAltCache() {
+    _altDeepCache = {};  // clear deep comparison cache too
     var codeInput = document.getElementById('searchCode');
     var code = codeInput ? codeInput.value : '';
     if (!code) return;
@@ -1382,7 +1398,14 @@
       return;
     }
 
-    // Build cards
+    // Build cards with deep analysis button state
+    // Button is disabled until all scoring is done (or errored)
+    var deepBtnEnabled = (_altScoreLoadState === 'done');
+    var deepBtnTitle = deepBtnEnabled ? '展开对比分析' : 
+      (_altScoreLoadState === 'loading' ? '等待深度评分加载中...' : '等待数据加载中...');
+    var btnCls = deepBtnEnabled ? 'btn-alt-deep' : 'btn-alt-deep disabled';
+    var btnAttr = deepBtnEnabled ? ' data-alt-deep="' : '';
+
     var cardsHtml = '';
     for (var i = 0; i < alts.length; i++) {
       var a = alts[i];
@@ -1434,7 +1457,7 @@
             ? '<div class="alt-score-bar"><div class="alt-score-label">综合评分 ' + scoreBadge + (recd ? ' · ' + recd : '') + '</div><div class="alt-score-value ' + scoreCls + '">' + realScore + '分</div></div>'
             : '<div class="alt-score-bar"><div class="alt-score-label" style="color:#999">评分计算中...</div></div>') +
         '</div>' +
-        '<button class="btn-alt-deep" data-alt-deep="' + i + '" title="展开对比分析">' +
+        '<button class="' + btnCls + '"' + btnAttr + i + '" title="' + deepBtnTitle + '">' +
           '📊 深度对比' +
           '<span class="alt-deep-arrow" id="altDeepArrow' + i + '">▾</span>' +
         '</button>' +
@@ -1495,26 +1518,41 @@
     if (isOpen) {
       panel.style.display = 'none';
       if (arrow) arrow.textContent = '▾';
-      // Stop any ongoing streaming
       if (panel._streamAbort) { panel._streamAbort.abort(); panel._streamAbort = null; }
       return;
     }
 
-    // Build deep analysis
+    // Guard: don't allow deep analysis while scores are still loading
+    if (_altScoreLoadState !== 'done') {
+      console.warn('[Alt Deep] 深度评分尚未完成，请稍后再试');
+      return;
+    }
+
     const alt = _altDataCache[index];
     if (!alt || !currentReport) return;
 
+    var fc = alt.code_full || (alt.code && alt.code.startsWith('6') ? alt.code + '.SH' : alt.code + '.SZ');
+    var cacheKey = (currentReport.code || '') + '_' + (fc || '');
+    
     panel.style.display = 'block';
     if (arrow) arrow.textContent = '▴';
 
-    // Build rule-based HTML with placeholder index
-    let html = buildAltDeepAnalysis(alt, currentReport);
-    // Replace INDEX_PLACEHOLDER with actual index so IDs are unique
-    html = html.replace(/INDEX_PLACEHOLDER/g, index);
+    // Check cache first
+    if (_altDeepCache[cacheKey]) {
+      console.log('%c[Alt Deep] 命中缓存，自动展开 ' + cacheKey, 'color:#44bb44');
+      panel.innerHTML = _altDeepCache[cacheKey].html;
+      return;
+    }
 
+    // Build rule-based HTML
+    let html = buildAltDeepAnalysis(alt, currentReport);
+    html = html.replace(/INDEX_PLACEHOLDER/g, index);
     panel.innerHTML = html;
 
-    // Start AI streaming comparison
+    // Cache the rule-based part immediately
+    _altDeepCache[cacheKey] = { html: html, streamHtml: '' };
+
+    // Start AI streaming comparison (updates cache on completion)
     fetchAltDeepCompareStream(index, alt, currentReport);
   }
 
@@ -1816,6 +1854,13 @@
         }
       }
       console.log('[AltDeep] Stream complete for index', index);
+      // Update cache with final HTML (rule-based + AI content)
+      var altForCache = _altDataCache[index];
+      if (altForCache && currentReport) {
+        var fcCache = altForCache.code_full || (altForCache.code && altForCache.code.startsWith('6') ? altForCache.code + '.SH' : altForCache.code + '.SZ');
+        var ck = (currentReport.code || '') + '_' + (fcCache || '');
+        _altDeepCache[ck] = { html: panel.innerHTML, streamHtml: '' };
+      }
     } catch (err) {
       if (err.name === 'AbortError') { console.log('[AltDeep] Stream aborted for index', index); return; }
       console.error('[AltDeep] Stream error:', err);

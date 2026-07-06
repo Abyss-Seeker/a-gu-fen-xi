@@ -10,8 +10,15 @@ import json
 import os
 import time
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
+
+# China timezone (UTC+8) — ensures consistent timestamps regardless of server location
+CN_TZ = timezone(timedelta(hours=8))
+
+def now_cn():
+    """Return current datetime in China timezone (UTC+8)."""
+    return datetime.now(CN_TZ)
 
 # ========== Proxy workaround: must happen BEFORE any import of requests/akshare ==========
 # Nuke ALL proxy-related env vars — they break Chinese financial data APIs
@@ -831,7 +838,7 @@ def analyze_stock(code):
         "total_mv": total_mv,
         "circ_mv": circ_mv,
         "change_pct": change_pct,
-        "report_time": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "report_time": now_cn().strftime("%Y-%m-%d %H:%M"),
         "prices_data": prices_data,  # K-line data for chart rendering
         "scores": {},
     }
@@ -1898,64 +1905,112 @@ def _lightweight_score(candidate, context=None):
 
 def find_price_similar(code):
     """
-    Find stocks with similar price range (±30%).
-    Uses static stock pool + batch quotes + lightweight scoring.
-    Zero risk of rate limiting — single batch quote call.
+    Find stocks with similar price range (±25%).
+    Multi-layer fallback for Vercel resilience:
+      1. Batch quotes → filter by price range ±25%
+      2. If < 4 results, try individual Sina quotes for known candidates
+      3. If still < 4, use price bracket presets from static pool
     """
     cache_key = f"ps_{code}"
     cached_val = cached(cache_key, ttl=600)
     if cached_val:
         return cached_val
-    
+
     try:
         # Get primary stock price
         info = get_stock_info(code)
         price = info.get('最新价', 0)
         if not price:
             return []
-        
+
         symbol = code.replace('.SZ', '').replace('.SH', '').replace('.BJ', '')
-        lo = price * 0.7
-        hi = price * 1.3
-        
-        # Get all candidates from static pool
+        lo = price * 0.75
+        hi = price * 1.25
+
+        # ---- Layer 1: Static pool + batch quotes ----
         all_candidates = _get_all_candidate_codes()
-        # Exclude primary stock
         all_candidates = [x for x in all_candidates if x[0] != symbol]
-        
+
         if not all_candidates:
             return []
-        
-        # Batch get quotes (Tencent + Sina fallback)
+
         wc_codes = [x[2] for x in all_candidates]
         quotes = _batch_get_quotes(wc_codes)
-        
-        # Filter and score
-        candidates = []
+
+        # Filter by price range
+        in_range = []
+        out_of_range = []
+        no_data = []
         for c, n, wc in all_candidates:
             q = quotes.get(wc, {})
             p = q.get('price', 0) or 0
-            if lo <= p <= hi:
-                cand = {
-                    'code': c,
-                    'name': n,
-                    'wc': wc,
-                    'price': p,
-                    'pe': q.get('pe', 0) or 0,
-                    'pb': q.get('pb', 0) or 0,
-                    'change': q.get('change_pct', 0) or 0,
-                    'market_cap': q.get('mcap', 0) or 0,
-                }
-                score_result = _lightweight_score(cand)
-                cand['total_score'] = score_result['total_score']
-                cand['recommendation'] = score_result['recommendation']
-                cand['scores_breakdown'] = score_result['breakdown']
-                cand['code_full'] = c + ('.SH' if wc.startswith('sh') else '.SZ')
-                candidates.append(cand)
-        
+            cand = {
+                'code': c, 'name': n, 'wc': wc, 'price': p,
+                'pe': q.get('pe', 0) or 0, 'pb': q.get('pb', 0) or 0,
+                'change': q.get('change_pct', 0) or 0,
+                'market_cap': q.get('mcap', 0) or 0,
+            }
+            if p > 0 and lo <= p <= hi:
+                in_range.append(cand)
+            elif p > 0:
+                out_of_range.append(cand)
+            else:
+                no_data.append(cand)
+
+        # ---- Layer 2: If not enough in-range, try Sina single quotes for no_data ----
+        if len(in_range) < 4 and no_data:
+            print(f"[find_price_similar] Layer 1 only {len(in_range)} in range, trying Sina singles for {len(no_data)} without data")
+            for cand in no_data[:20]:  # try up to 20
+                try:
+                    fb = api_fallback.sina_get_stock_info(cand['wc'] if cand['wc'].startswith('sh') else cand['wc'])
+                    p = fb.get('最新价', 0)
+                    if p > 0:
+                        cand['price'] = p
+                        cand['name'] = fb.get('股票简称', cand['name'])
+                        if lo <= p <= hi:
+                            in_range.append(cand)
+                        else:
+                            out_of_range.append(cand)
+                except:
+                    pass
+
+        # ---- Layer 3: If still not enough, include out_of_range sorted by price proximity ----
+        if len(in_range) < 4 and out_of_range:
+            out_of_range.sort(key=lambda x: abs(x['price'] - price))
+            needed = 4 - len(in_range)
+            print(f"[find_price_similar] Layer 3: adding {needed} closest out-of-range stocks")
+            for cand in out_of_range[:needed]:
+                in_range.append(cand)
+
+        # ---- Layer 4: Last resort, include no_data as name-only ----
+        if len(in_range) < 4 and no_data:
+            needed = 4 - len(in_range)
+            print(f"[find_price_similar] Layer 4: adding {needed} name-only stocks")
+            for cand in no_data[:needed]:
+                cand['price'] = 0  # will show as "--" in UI
+                in_range.append(cand)
+
+        # Score all candidates
+        for cand in in_range:
+            score_result = _lightweight_score(cand)
+            cand['total_score'] = score_result['total_score']
+            cand['recommendation'] = score_result['recommendation']
+            cand['scores_breakdown'] = score_result['breakdown']
+            cand['code_full'] = cand['code'] + ('.SH' if cand['wc'].startswith('sh') else '.SZ')
+
         # Sort by score, take top 4
-        candidates.sort(key=lambda x: x['total_score'], reverse=True)
-        result = candidates[:4]
+        in_range.sort(key=lambda x: x['total_score'], reverse=True)
+        result = in_range[:4]
+
+        print(f"[find_price_similar] Price range ¥{lo:.2f}-{hi:.2f}, returning {len(result)} candidates")
+        cache_set(cache_key, result)
+        return result
+
+    except Exception as e:
+        print(f"[find_price_similar] Error: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
         
         print(f"[find_price_similar] Price range ¥{lo:.2f}-{hi:.2f}, found {len(candidates)} total, returning {len(result)}")
         cache_set(cache_key, result)
@@ -2158,7 +2213,7 @@ def alternatives_base():
         print(f"[alt_base] recommended error: {e}")
         result["recommended"] = []
 
-    cache_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cache_time = now_cn().strftime("%Y-%m-%d %H:%M:%S")
     result["_cache_time"] = cache_time
     result["_cache_meta"] = {"time": cache_time, "from_cache": False, "ttl": 600}
     result["_meta"] = {"fb": api_fallback.get_fallback_log()[-15:]}
@@ -2231,8 +2286,8 @@ def alternatives_score():
         "scores": scores,
         "errors": errors,
         "elapsed": round(_elapsed, 2),
-        "_cache_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "_cache_meta": {"time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "from_cache": False, "ttl": 600},
+        "_cache_time": now_cn().strftime("%Y-%m-%d %H:%M:%S"),
+        "_cache_meta": {"time": now_cn().strftime("%Y-%m-%d %H:%M:%S"), "from_cache": False, "ttl": 600},
         "_meta": {"fb": api_fallback.get_fallback_log()[-10:]}
     }
     cache_set(cache_key, result)
@@ -3284,7 +3339,7 @@ def health():
     return jsonify({
         "status": "ok",
         "data_source": "Tencent + EastMoney + Sina(fallback)",
-        "time": datetime.now().isoformat(),
+        "time": now_cn().isoformat(),
     })
 
 

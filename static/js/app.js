@@ -1206,7 +1206,7 @@
       var fullCount = Object.keys(_altFullScores).length;
       html += ' · ✅ ' + fullCount + ' 只已深度计算';
     }
-    html += ' <button onclick="event.stopPropagation();clearAltCache()" style="font-size:0.65rem;padding:2px 8px;background:#fee;border:1px solid #fcc;border-radius:10px;cursor:pointer;color:#c33">🔄 刷新缓存</button>';
+    html += ' <button class="btn-alt-cache-clear" style="font-size:0.65rem;padding:2px 8px;background:#fee;border:1px solid #fcc;border-radius:10px;cursor:pointer;color:#c33">🔄 刷新缓存</button>';
 
     el.innerHTML = html;
   }
@@ -1323,6 +1323,13 @@
     if (tab) {
       var mode = tab.getAttribute('data-alt-mode');
       if (mode) switchAltTab(mode);
+      return;
+    }
+    // Cache clear button
+    var cacheBtn = e.target.closest('.btn-alt-cache-clear');
+    if (cacheBtn) {
+      e.stopPropagation();
+      clearAltCache();
       return;
     }
     // Alt card click: switch to that stock

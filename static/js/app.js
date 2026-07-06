@@ -1433,7 +1433,13 @@
           (realScore > 0
             ? '<div class="alt-score-bar"><div class="alt-score-label">综合评分 ' + scoreBadge + (recd ? ' · ' + recd : '') + '</div><div class="alt-score-value ' + scoreCls + '">' + realScore + '分</div></div>'
             : '<div class="alt-score-bar"><div class="alt-score-label" style="color:#999">评分计算中...</div></div>') +
-        '</div></div>';
+        '</div>' +
+        '<button class="btn-alt-deep" data-alt-deep="' + i + '" title="展开对比分析">' +
+          '📊 深度对比' +
+          '<span class="alt-deep-arrow" id="altDeepArrow' + i + '">▾</span>' +
+        '</button>' +
+        '<div class="alt-deep-panel" id="altDeepPanel' + i + '" style="display:none"></div>' +
+        '</div>';
     }
 
     container.innerHTML = '<div class="alt-grid">' + cardsHtml + '</div>' +
@@ -1469,6 +1475,13 @@
         if (searchInput) searchInput.value = fc;
         if (searchBtn) searchBtn.click();
       }
+    }
+    // Deep analysis button click
+    var deepBtn = e.target.closest('.btn-alt-deep');
+    if (deepBtn) {
+      e.stopPropagation();
+      var idx = parseInt(deepBtn.getAttribute('data-alt-deep'));
+      if (!isNaN(idx)) toggleAltDeepAnalysis(idx);
     }
   });
 

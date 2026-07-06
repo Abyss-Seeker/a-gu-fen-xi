@@ -273,7 +273,7 @@
       <div class="report-section">
         <div class="section-header" onclick="this.nextElementSibling.classList.toggle('collapsed')">
           <h3>🕯️ K线走势图</h3>
-          <span style="font-size:0.75rem;color:var(--text-secondary)">拖拽滑块调整时间范围 · 7条均线</span>
+          <span style="font-size:0.75rem;color:var(--text-secondary)">拖拽滑块调整时间范围 · 7条均线 · 共${(r.prices_data||[]).length}根K线</span>
         </div>
         <div class="section-body">
           <div id="klineChart" style="width:100%;height:420px"></div>
@@ -809,6 +809,10 @@
     }
 
     // Build option
+    // Default to showing ~200 bars, user can zoom out for full history
+    var defaultEnd = 100;
+    var defaultStart = Math.max(0, 100 - (200 / prices.length) * 100);
+
     var option = {
       animation: false,
       backgroundColor: '#fff',
@@ -889,16 +893,16 @@
         {
           type: 'inside',
           xAxisIndex: [0, 1],
-          start: Math.max(0, 100 - (150 / prices.length) * 100),
-          end: 100
+          start: defaultStart,
+          end: defaultEnd
         },
         {
           show: true,
           xAxisIndex: [0, 1],
           type: 'slider',
           bottom: 5,
-          start: Math.max(0, 100 - (150 / prices.length) * 100),
-          end: 100,
+          start: defaultStart,
+          end: defaultEnd,
           height: 25,
           borderColor: '#e0e0e0',
           fillerColor: 'rgba(59,130,246,0.1)',
@@ -991,51 +995,165 @@
     console.groupEnd();
   }
 
-  // ========== Alternatives: 3-Mode System ==========
+  // ========== Alternatives: 3-Mode System (Progressive) ==========
+
+  // Score source tracking for display
+  let _altFullScores = {};  // code_full -> {total_score, recommendation, scores_breakdown, source}
+  let _altScoreLoadState = 'idle';  // 'idle' | 'loading' | 'done'
 
   /**
-   * Load all 3 alternative modes in a single API call.
-   * Caches all results and renders the active mode.
+   * Progressive loading: base preview → full scoring
    */
   async function loadAllAlternatives(code) {
     var container = $('#altContent');
     if (!container) return;
 
-    // Reset tab to industry
+    // Reset
     _altActiveMode = 'industry';
+    _altFullScores = {};
+    _altScoreLoadState = 'idle';
     updateAltTabUI();
 
     try {
-      var resp = await fetch('/api/alternatives/all', {
+      // Step 1: Get base preview (fast, < 3s)
+      var baseResp = await fetch('/api/alternatives/base', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ code }),
       });
-      var data = await resp.json();
+      var baseData = await baseResp.json();
 
-      _altCache.industry = data.industry || [];
-      _altCache.price_similar = data.price_similar || [];
-      _altCache.recommended = data.recommended || [];
+      _altCache.industry = baseData.industry || [];
+      _altCache.price_similar = baseData.price_similar || [];
+      _altCache.recommended = baseData.recommended || [];
       _altCache._loaded = true;
+      _altCache._cache_meta = baseData._cache_meta;
 
-      _logFallbackInfo('替代标的(全部)', data, resp);
+      _logFallbackInfo('替代标的(基础)', baseData, baseResp);
 
-      // Render active mode
+      // Render cards with lightweight scores + "计算中" badge
       renderAltContent();
+
+      // Show cache info
+      showCacheInfo();
+
+      // Step 2: Collect all codes for full scoring
+      var allCodes = [];
+      var seen = {};
+      ['industry', 'price_similar', 'recommended'].forEach(function(mode) {
+        (_altCache[mode] || []).forEach(function(a) {
+          var fc = a.code_full || (a.code && a.code.startsWith('6') ? a.code + '.SH' : a.code + '.SZ');
+          if (fc && !seen[fc]) {
+            seen[fc] = true;
+            allCodes.push(fc);
+          }
+        });
+      });
+
+      if (allCodes.length === 0) return;
+
+      // Step 3: Score in batches of 4
+      _altScoreLoadState = 'loading';
+      var BATCH = 4;
+      var totalBatches = Math.ceil(allCodes.length / BATCH);
+      var completedBatches = 0;
+      var totalErrors = [];
+
+      for (var b = 0; b < allCodes.length; b += BATCH) {
+        var batch = allCodes.slice(b, b + BATCH);
+        var batchNum = Math.floor(b / BATCH) + 1;
+
+        try {
+          var scoreResp = await fetchWithTimeout('/api/alternatives/score', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ codes: batch }),
+          }, 12000);
+
+          var scoreData = await scoreResp.json();
+          var sc = scoreData.scores || [];
+
+          // Store full scores
+          sc.forEach(function(s) {
+            if (s.source === 'full' && s.total_score > 0) {
+              _altFullScores[s.code] = s;
+            }
+          });
+
+          if (scoreData.errors && scoreData.errors.length > 0) {
+            totalErrors = totalErrors.concat(scoreData.errors);
+            console.warn(
+              '%c[Alt Score] 批次 ' + batchNum + '/' + totalBatches + ' 部分失败:',
+              'color:#ffa500',
+              scoreData.errors
+            );
+          }
+
+          completedBatches++;
+          console.log(
+            '%c[Alt Score] 批次 ' + batchNum + '/' + totalBatches +
+            ' 完成 (' + sc.filter(function(s) { return s.source === 'full'; }).length + '/' + batch.length + ' 成功)' +
+            (scoreData._cache_meta && scoreData._cache_meta.from_cache ? ' [缓存]' : ''),
+            'color:#44bb44'
+          );
+
+        } catch (err) {
+          totalErrors.push({ batch: batchNum, error: err.message || 'timeout' });
+          console.error(
+            '%c[Alt Score] 批次 ' + batchNum + '/' + totalBatches + ' 超时/失败:',
+            'color:#ff4444',
+            err.message || err
+          );
+        }
+
+        // Update cards after each batch so user sees progress
+        renderAltContent();
+        showCacheInfo();
+      }
+
+      _altScoreLoadState = 'done';
+
+      // Final render
+      renderAltContent();
+      showCacheInfo();
+
+      if (totalErrors.length > 0) {
+        console.warn(
+          '%c[Alt Score] 完成，' + totalErrors.length + ' 个错误',
+          'color:#ffa500',
+          totalErrors
+        );
+      }
+
     } catch (err) {
       console.error('[Alt] Load all error:', err);
       if (container) container.innerHTML = '<p style="color:var(--text-secondary)">替代标的数据加载失败，请刷新重试</p>';
     }
   }
 
-  // Backward compat: old loadAlternatives still called by analyzeStock
+  /**
+   * Helper: fetch with timeout
+   */
+  function fetchWithTimeout(url, options, timeoutMs) {
+    return new Promise(function(resolve, reject) {
+      var timer = setTimeout(function() {
+        reject(new Error('fetch timeout ' + timeoutMs + 'ms'));
+      }, timeoutMs);
+      fetch(url, options).then(function(resp) {
+        clearTimeout(timer);
+        resolve(resp);
+      }).catch(function(err) {
+        clearTimeout(timer);
+        reject(err);
+      });
+    });
+  }
+
+  // Backward compat
   async function loadAlternatives(code) {
     return loadAllAlternatives(code);
   }
 
-  /**
-   * Switch active alternatives tab.
-   */
   function switchAltTab(mode) {
     if (!_altCache._loaded) return;
     _altActiveMode = mode;
@@ -1043,9 +1161,6 @@
     renderAltContent();
   }
 
-  /**
-   * Update tab button active states.
-   */
   function updateAltTabUI() {
     var tabs = document.querySelectorAll('.alt-tab');
     for (var i = 0; i < tabs.length; i++) {
@@ -1060,8 +1175,65 @@
   }
 
   /**
-   * Render alternatives for the current active mode.
+   * Show cache info below the alt tabs
    */
+  function showCacheInfo() {
+    var el = $('#altCacheInfo');
+    if (!el) {
+      // Create cache info bar
+      var container = $('#altContent');
+      if (!container) return;
+      var existing = $('#altCacheInfo');
+      if (existing) existing.remove();
+      el = document.createElement('div');
+      el.id = 'altCacheInfo';
+      el.style.cssText = 'font-size:0.7rem;color:#94a3b8;margin-top:8px;display:flex;align-items:center;gap:8px;justify-content:flex-end';
+      container.parentNode.appendChild(el);
+    }
+
+    var meta = _altCache._cache_meta || {};
+    var timeStr = meta.time || '';
+    var fromCache = meta.from_cache;
+    var scoreState = _altScoreLoadState;
+
+    var html = '';
+    if (timeStr) {
+      html += '📦 数据' + (fromCache ? '缓存于 ' : '获取于 ') + timeStr + ' (10分钟有效)';
+    }
+    if (scoreState === 'loading') {
+      html += ' · ⏳ 深度评分计算中...';
+    } else if (scoreState === 'done') {
+      var fullCount = Object.keys(_altFullScores).length;
+      html += ' · ✅ ' + fullCount + ' 只已深度计算';
+    }
+    html += ' <button onclick="event.stopPropagation();clearAltCache()" style="font-size:0.65rem;padding:2px 8px;background:#fee;border:1px solid #fcc;border-radius:10px;cursor:pointer;color:#c33">🔄 刷新缓存</button>';
+
+    el.innerHTML = html;
+  }
+
+  /**
+   * Manual cache clear — reloads alternatives
+   */
+  async function clearAltCache() {
+    var codeInput = document.getElementById('searchCode');
+    var code = codeInput ? codeInput.value : '';
+    if (!code) return;
+
+    try {
+      await fetch('/api/alternatives/cache/clear', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: code }),
+      });
+      console.log('%c[Cache] 已清除替代标的缓存，重新加载中...', 'color:#44bb44');
+    } catch (e) {
+      console.warn('[Cache] Clear failed:', e);
+    }
+
+    // Reload
+    loadAllAlternatives(code);
+  }
+
   function renderAltContent() {
     var container = $('#altContent');
     if (!container) return;
@@ -1074,7 +1246,7 @@
     };
     var emptyLabels = {
       industry: '未找到同行业替代标的',
-      price_similar: '未找到同价位优质标的（可能是该价格区间暂无合适标的）',
+      price_similar: '未找到同价位优质标的',
       recommended: '暂无综合推荐标的',
     };
 
@@ -1088,9 +1260,33 @@
     for (var i = 0; i < alts.length; i++) {
       var a = alts[i];
       var fullCode = a.code_full || (a.code && a.code.startsWith('6') ? a.code + '.SH' : a.code + '.SZ');
-      var realScore = a.total_score || 0;
-      var scoreCls = realScore >= 60 ? 'good' : realScore >= 40 ? 'mid' : 'low';
-      var recd = a.recommendation || '';
+
+      // Check for full score
+      var fs = _altFullScores[fullCode];
+      var realScore, scoreCls, recd, scoreBadge;
+      if (fs && fs.source === 'full') {
+        realScore = fs.total_score || 0;
+        recd = fs.recommendation || '';
+        scoreCls = realScore >= 60 ? 'good' : realScore >= 40 ? 'mid' : 'low';
+        scoreBadge = '<span style="font-size:0.6rem;color:#22c55e;margin-left:4px">✅ 深度</span>';
+      } else if (_altScoreLoadState === 'loading') {
+        realScore = a.total_score || 0;
+        recd = a.recommendation || '';
+        scoreCls = realScore >= 60 ? 'good' : realScore >= 40 ? 'mid' : 'low';
+        scoreBadge = '<span style="font-size:0.6rem;color:#f59e0b;margin-left:4px">⏳ 计算中</span>';
+      } else if (_altScoreLoadState === 'done') {
+        // Done loading but no full score → lightweight only
+        realScore = a.total_score || 0;
+        recd = a.recommendation || '';
+        scoreCls = realScore >= 60 ? 'good' : realScore >= 40 ? 'mid' : 'low';
+        scoreBadge = '<span style="font-size:0.6rem;color:#94a3b8;margin-left:4px">⚠️ 轻量估算</span>';
+      } else {
+        realScore = a.total_score || 0;
+        recd = a.recommendation || '';
+        scoreCls = realScore >= 60 ? 'good' : realScore >= 40 ? 'mid' : 'low';
+        scoreBadge = '';
+      }
+
       var mcapDisplay = '';
       if (a.market_cap) {
         mcapDisplay = '<div class="alt-mcap">市值 ' + (a.market_cap / 1e8).toFixed(0) + '亿</div>';
@@ -1108,7 +1304,7 @@
           '</div>' +
           mcapDisplay +
           (realScore > 0
-            ? '<div class="alt-score-bar"><div class="alt-score-label">综合评分 ' + (recd ? '· ' + recd : '') + '</div><div class="alt-score-value ' + scoreCls + '">' + realScore + '分</div></div>'
+            ? '<div class="alt-score-bar"><div class="alt-score-label">综合评分 ' + scoreBadge + (recd ? ' · ' + recd : '') + '</div><div class="alt-score-value ' + scoreCls + '">' + realScore + '分</div></div>'
             : '<div class="alt-score-bar"><div class="alt-score-label" style="color:#999">评分计算中...</div></div>') +
         '</div></div>';
     }
@@ -1118,7 +1314,6 @@
         (modeLabels[_altActiveMode] || '') + ' | 点击卡片可切换分析该股票' +
       '</p>';
 
-    // Update data cache for deep analysis compatibility
     _altDataCache = alts;
   }
 

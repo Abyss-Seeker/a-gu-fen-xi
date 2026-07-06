@@ -239,29 +239,36 @@ def get_stock_info(code):
 
 
 def get_price_history(code, days=250):
-    """Get historical K-line data via Tencent API."""
+    """Get historical K-line data.
+    Primary: EastMoney API (supports IPO-level, up to ~7000 bars)
+    Fallback: Tencent kline API (limited to ~640 bars, 2.5 years)
+    """
     cache_key = f"price_{code}"
     cached_val = cached(cache_key, ttl=600)
     if cached_val:
         return cached_val
 
+    # ---- Layer 1: EastMoney K-line (IPO-level) ----
+    try:
+        result = api_fallback.em_get_price_history(code, 8000)
+        if result and len(result) >= 10:
+            print(f"[get_price_history] EastMoney: {len(result)} klines for {code}")
+            cache_set(cache_key, result)
+            return result
+    except Exception as e:
+        print(f"[get_price_history] EastMoney failed: {e}")
+
+    # ---- Layer 2: Tencent K-line (fallback) ----
     try:
         tc = _tencent_code(code)
-        resp = _http_get(f"{TENCENT_QT}{tc}", params={"q": "jk", "fmt": "json"})
-        if resp.status_code != 200 or not resp.text:
-            cache_set(cache_key, [])
-            return []
-
-        # Tencent K-line API
         kline_url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
         params = {
             "param": f"{tc},day,,,{days + 30},qfq",
             "_": str(int(time.time() * 1000)),
         }
-        resp2 = _http_get(kline_url, params=params, timeout=15)
-        data = resp2.json()
+        resp = _http_get(kline_url, params=params, timeout=15)
+        data = resp.json()
 
-        # Navigate the nested structure
         stock_data = data.get("data", {}).get(tc, {})
         klines = stock_data.get("qfqday", stock_data.get("day", []))
 
@@ -280,19 +287,11 @@ def get_price_history(code, days=250):
                 "成交量": int(float(k[5])),
             })
 
+        print(f"[get_price_history] Tencent: {len(result)} klines for {code}")
         cache_set(cache_key, result)
         return result
     except Exception as e:
-        print(f"[PRIMARY] Error fetching price history for {code}: {e}")
-
-    # ---- Fallback: EastMoney K-line API ----
-    try:
-        fb_history = api_fallback.em_get_price_history(code, days)
-        if fb_history:
-            cache_set(cache_key, fb_history)
-            return fb_history
-    except Exception as fe:
-        print(f"[FALLBACK] EastMoney kline also failed for {code}: {fe}")
+        print(f"[get_price_history] Tencent also failed: {e}")
 
     return []
 
@@ -2115,17 +2114,167 @@ def alternatives():
     })
 
 
+# ============================================================
+# Progressive Alternatives — Base + Score + Cache
+# ============================================================
+
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
+
+@app.route("/api/alternatives/base", methods=["POST"])
+def alternatives_base():
+    """Fast preview: returns candidate lists with basic data + lightweight scores.
+    No full analyze_stock calls — responds in < 3s."""
+    data = request.json
+    code = data.get("code", "").strip()
+    if not code:
+        return jsonify({"error": "请输入股票代码"}), 400
+
+    cache_key = f"altbase_{code}"
+    cached_val = cached(cache_key, ttl=600)
+    if cached_val:
+        t = cached_val.pop("_cache_time", "")
+        cached_val["_cache_meta"] = {"time": t, "from_cache": True, "ttl": 600}
+        return jsonify(cached_val)
+
+    import time as _base_time
+    _t0 = _base_time.time()
+    result = {}
+
+    try:
+        result["industry"] = find_alternatives(code)
+    except Exception as e:
+        print(f"[alt_base] industry error: {e}")
+        result["industry"] = []
+
+    try:
+        result["price_similar"] = find_price_similar(code)
+    except Exception as e:
+        print(f"[alt_base] price_sim error: {e}")
+        result["price_similar"] = []
+
+    try:
+        result["recommended"] = find_recommended(code)
+    except Exception as e:
+        print(f"[alt_base] recommended error: {e}")
+        result["recommended"] = []
+
+    cache_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    result["_cache_time"] = cache_time
+    result["_cache_meta"] = {"time": cache_time, "from_cache": False, "ttl": 600}
+    result["_meta"] = {"fb": api_fallback.get_fallback_log()[-15:]}
+
+    _elapsed = _base_time.time() - _t0
+    print(f"[alt_base] Completed in {_elapsed:.2f}s for {code}")
+
+    cache_set(cache_key, result)
+    return jsonify(result)
+
+
+@app.route("/api/alternatives/score", methods=["POST"])
+def alternatives_score():
+    """Batch full scoring: analyze_stock() for up to 4 codes.
+    ThreadPoolExecutor with 10s total timeout."""
+    data = request.json
+    codes = data.get("codes", [])
+    if not codes:
+        return jsonify({"error": "请提供股票代码列表"}), 400
+    codes = codes[:4]
+
+    cache_key = f"altscore_{'_'.join(sorted(codes))}"
+    cached_val = cached(cache_key, ttl=600)
+    if cached_val:
+        t = cached_val.pop("_cache_time", "")
+        cached_val["_cache_meta"] = {"time": t, "from_cache": True, "ttl": 600}
+        return jsonify(cached_val)
+
+    import time as _sc_time
+    _t0 = _sc_time.time()
+    scores = []
+    errors = []
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        future_map = {executor.submit(analyze_stock, c): c for c in codes}
+
+        try:
+            for future in as_completed(future_map, timeout=10):
+                stock_code = future_map[future]
+                try:
+                    analysis = future.result(timeout=8)
+                    if analysis and "error" not in analysis:
+                        scores.append({
+                            "code": stock_code,
+                            "code_full": stock_code,
+                            "name": analysis.get("name", ""),
+                            "total_score": analysis.get("total_score", 0),
+                            "max_score": analysis.get("max_score", 100),
+                            "recommendation": analysis.get("recommendation", ""),
+                            "scores_breakdown": analysis.get("scores", {}),
+                            "source": "full",
+                        })
+                    else:
+                        errors.append({"code": stock_code, "error": str(analysis.get("error", "unknown") if analysis else "no result")})
+                except FuturesTimeoutError:
+                    errors.append({"code": stock_code, "error": "timeout (8s)"})
+                except Exception as e:
+                    errors.append({"code": stock_code, "error": str(e)[:80]})
+        except FuturesTimeoutError:
+            pass  # batch-level timeout
+
+    # Fill in failed codes with empty scores
+    completed = {s["code"] for s in scores}
+    for c in codes:
+        if c not in completed:
+            scores.append({"code": c, "code_full": c, "name": "", "total_score": 0, "source": "failed"})
+
+    _elapsed = _sc_time.time() - _t0
+    result = {
+        "scores": scores,
+        "errors": errors,
+        "elapsed": round(_elapsed, 2),
+        "_cache_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "_cache_meta": {"time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "from_cache": False, "ttl": 600},
+        "_meta": {"fb": api_fallback.get_fallback_log()[-10:]}
+    }
+    cache_set(cache_key, result)
+    return jsonify(result)
+
+
+@app.route("/api/alternatives/cache/clear", methods=["POST"])
+def alternatives_cache_clear():
+    """Clear alternatives-related caches."""
+    data = request.json or {}
+    code = data.get("code", "").strip()
+    cleared = []
+
+    if code and code != "*":
+        targets = [f"altbase_{code}", f"ps_{code}", f"rc_{code}", f"alt_{code}"]
+        for k in list(CACHE.keys()):
+            if k in targets or (k.startswith("altscore_") and code.replace(".SH", "").replace(".SZ", "") in k):
+                cleared.append(k)
+    else:
+        for k in list(CACHE.keys()):
+            if any(k.startswith(p) for p in ["altbase_", "altscore_", "alt_", "ps_", "rc_"]):
+                cleared.append(k)
+
+    for k in cleared:
+        if k in CACHE:
+            del CACHE[k]
+        if k + "_ttl" in CACHE:
+            del CACHE[k + "_ttl"]
+
+    return jsonify({"status": "ok", "cleared": len(cleared), "keys": cleared[:20]})
+
+
 @app.route("/api/alternatives/all", methods=["POST"])
 def alternatives_all():
-    """Return all 3 alternative modes in a single response.
-    Avoids rate limits by using one batch quote call for all modes."""
+    """Backward-compatible: all 3 modes with lightweight scores.
+    For progressive full scoring, use /api/alternatives/base + /api/alternatives/score."""
     data = request.json
     code = data.get("code", "").strip()
     if not code:
         return jsonify({"error": "请输入股票代码"}), 400
 
     try:
-        # Run all three modes
         industry = find_alternatives(code)
     except Exception as e:
         print(f"[alternatives_all] industry error: {e}")

@@ -317,6 +317,8 @@ EM_KLINE_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
 def em_get_price_history(code, days=250):
     """
     Get K-line data from EastMoney API.
+    Supports IPO-level data: up to ~7000 bars (30+ years).
+
     Returns: list of {日期, 开盘, 收盘, 最高, 最低, 成交量},
              same structure as get_price_history().
     """
@@ -327,6 +329,9 @@ def em_get_price_history(code, days=250):
         else:
             secid = f"1.{symbol}"
 
+        # Request more than needed — API caps at ~7000 naturally
+        request_lmt = max(days + 100, 8000)
+
         params = {
             "secid": secid,
             "fields1": "f1,f2,f3,f4,f5,f6",
@@ -334,7 +339,7 @@ def em_get_price_history(code, days=250):
             "klt": "101",        # daily K-line
             "fqt": "1",          # 前复权 (forward-adjusted)
             "end": "20500101",
-            "lmt": days + 30,
+            "lmt": request_lmt,
         }
         resp = requests.get(
             EM_KLINE_URL,
@@ -352,7 +357,7 @@ def em_get_price_history(code, days=250):
             return []
 
         result = []
-        for line in klines[-days:]:
+        for line in klines:
             parts = line.split(",")
             if len(parts) >= 6:
                 result.append({

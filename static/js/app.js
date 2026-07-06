@@ -1089,6 +1089,13 @@
     _altScoreLoadState = 'idle';
     updateAltTabUI();
 
+    // Clear old content immediately — show loading
+    container.innerHTML = '<p style="color:var(--text-secondary);padding:16px 0">⏳ 正在加载替代标的...</p>';
+
+    // Also clear cache info bar
+    var cacheInfo = $('#altCacheInfo');
+    if (cacheInfo) cacheInfo.innerHTML = '';
+
     try {
       // Step 1: Get base preview (fast, < 3s)
       var baseResp = await fetch('/api/alternatives/base', {
@@ -1293,6 +1300,12 @@
     var codeInput = document.getElementById('searchCode');
     var code = codeInput ? codeInput.value : '';
     if (!code) return;
+
+    // Clear display immediately
+    var container = $('#altContent');
+    if (container) container.innerHTML = '<p style="color:var(--text-secondary);padding:16px 0">⏳ 正在刷新替代标的...</p>';
+    var cacheInfo = $('#altCacheInfo');
+    if (cacheInfo) cacheInfo.innerHTML = '';
 
     try {
       await fetch('/api/alternatives/cache/clear', {

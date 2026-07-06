@@ -1486,7 +1486,7 @@
           var panel = document.getElementById('altDeepPanel' + di);
           var arrow = document.getElementById('altDeepArrow' + di);
           if (panel) {
-            panel.innerHTML = cached.html;
+            _renderDeepCacheToPanel(panel, cached, di);
             panel.style.display = 'block';
             if (arrow) arrow.textContent = '▴';
             console.log('%c[Alt Deep] 自动展开缓存: ' + ck, 'color:#44bb44');
@@ -1563,7 +1563,8 @@
     // Check cache first
     if (_altDeepCache[cacheKey]) {
       console.log('%c[Alt Deep] 命中缓存，自动展开 ' + cacheKey, 'color:#44bb44');
-      panel.innerHTML = _altDeepCache[cacheKey].html;
+      _renderDeepCacheToPanel(panel, _altDeepCache[cacheKey], index);
+      if (arrow) arrow.textContent = '▴';
       return;
     }
 
@@ -1572,11 +1573,47 @@
     html = html.replace(/INDEX_PLACEHOLDER/g, index);
     panel.innerHTML = html;
 
-    // Cache the rule-based part immediately
-    _altDeepCache[cacheKey] = { html: html, streamHtml: '' };
+    // Init cache: store rule-based HTML + empty sections for LLM content
+    _altDeepCache[cacheKey] = {
+      html: html,
+      sections: { score_analysis: '', financial_analysis: '', debate_analysis: '', verdict: '' },
+      completed: false
+    };
 
-    // Start AI streaming comparison (updates cache on completion)
+    // Start AI streaming comparison (updates cache.sections and DOM in parallel)
     fetchAltDeepCompareStream(index, alt, currentReport);
+  }
+
+  /**
+   * Render cached deep analysis to panel, combining rule-based HTML + LLM sections.
+   */
+  function _renderDeepCacheToPanel(panel, cacheEntry, index) {
+    if (!cacheEntry) return;
+    var html = cacheEntry.html;
+    var sections = cacheEntry.sections || {};
+
+    // If we have LLM content, inject it into the HTML by replacing loading placeholders
+    var secIds = { score_analysis: 'altAiScore_', financial_analysis: 'altAiFinance_',
+                   debate_analysis: 'altAiDebate_', verdict: 'altAiVerdict_' };
+    for (var sk in secIds) {
+      var elId = secIds[sk] + index;
+      var content = sections[sk] || '';
+      var divHtml = '';
+      if (content) {
+        divHtml = '<div class="alt-ai-content">' + renderSimpleMarkdown(content) + '</div>';
+      } else if (cacheEntry.completed) {
+        divHtml = '<div class="alt-ai-content alt-ai-empty">（AI 未生成该部分内容）</div>';
+      } else {
+        divHtml = '<div class="alt-ai-loading"><span class="alt-ai-dot"></span> AI 正在生成辩论式分析...</div>';
+      }
+      // Replace the section placeholder
+      var pattern = new RegExp('<div[^>]*id="' + elId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '"[^>]*>.*?</div>', 's');
+      if (pattern.test(html)) {
+        html = html.replace(pattern, '<div id="' + elId + '">' + divHtml + '</div>');
+      }
+    }
+
+    panel.innerHTML = html;
   }
 
   function buildAltDeepAnalysis(alt, cur) {
@@ -1772,6 +1809,14 @@
     const panel = document.getElementById('altDeepPanel' + index);
     if (!panel) return;
 
+    // Build cache key
+    var altFc = alt.code_full || (alt.code && alt.code.startsWith('6') ? alt.code + '.SH' : alt.code + '.SZ');
+    var ck = (currentReport.code || '') + '_' + (altFc || '');
+    // Ensure cache entry exists (should be created by toggleAltDeepAnalysis)
+    if (!_altDeepCache[ck]) {
+      _altDeepCache[ck] = { html: '', sections: { score_analysis: '', financial_analysis: '', debate_analysis: '', verdict: '' }, completed: false };
+    }
+
     // Abort any previous stream for this panel
     if (panel._streamAbort) { panel._streamAbort.abort(); }
     const controller = new AbortController();
@@ -1829,11 +1874,13 @@
             if (section === 'error') {
               console.error('[AltDeep] Error from server:', content);
               for (const [sKey, elId] of Object.entries(sectionIdMap)) {
-                const el = document.getElementById(elId + index);
-                if (el && !completedSections.has(sKey)) {
-                  el.innerHTML = `<div class="alt-ai-content alt-ai-error">❌ ${escapeHtml(content)}</div>`;
+                if (!completedSections.has(sKey)) {
+                  _altDeepCache[ck].sections[sKey] = '❌ ' + escapeHtml(content);
                   completedSections.add(sKey);
                 }
+                // Also try DOM if panel still exists
+                const el = document.getElementById(elId + index);
+                if (el) el.innerHTML = '<div class="alt-ai-content alt-ai-error">❌ ' + escapeHtml(content) + '</div>';
               }
               continue;
             }
@@ -1841,26 +1888,25 @@
             const elId = sectionIdMap[section];
             if (!elId) continue;
 
-            const el = document.getElementById(elId + index);
-            if (!el) {
-              console.warn('[AltDeep] Element not found:', elId + index);
-              continue;
+            // ALWAYS save to cache — survives tab switches
+            if (!completedSections.has(section)) {
+              _altDeepCache[ck].sections[section] = content;
+              completedSections.add(section);
+            } else {
+              _altDeepCache[ck].sections[section] += content;
             }
 
-            // Replace loading state with actual content
-            if (!completedSections.has(section)) {
-              completedSections.add(section);
-              console.log('[AltDeep] Rendering section:', section);
-              el.innerHTML = `<div class="alt-ai-content">${renderSimpleMarkdown(content)}</div>`;
-            } else {
-              // Append additional content
-              const contentEl = el.querySelector('.alt-ai-content');
-              if (contentEl) {
-                contentEl.innerHTML += renderSimpleMarkdown(content);
+            // Try DOM update — OK if panel was replaced by tab switch
+            const el = document.getElementById(elId + index);
+            if (el) {
+              if (!el._deepInit) {
+                el.innerHTML = '<div class="alt-ai-content">' + renderSimpleMarkdown(content) + '</div>';
+                el._deepInit = true;
+              } else {
+                var contentEl = el.querySelector('.alt-ai-content');
+                if (contentEl) contentEl.innerHTML += renderSimpleMarkdown(content);
               }
             }
-
-            el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
           } catch (e) {
             console.warn('[AltDeep] JSON parse error:', e.message, 'data:', data.substring(0, 100));
           }
@@ -1870,20 +1916,16 @@
       // Mark remaining sections
       for (const [sKey, elId] of Object.entries(sectionIdMap)) {
         if (!completedSections.has(sKey)) {
+          _altDeepCache[ck].sections[sKey] = '';
           const el = document.getElementById(elId + index);
           if (el) {
             el.innerHTML = '<div class="alt-ai-content alt-ai-empty">（AI 未生成该部分内容）</div>';
           }
         }
       }
-      console.log('[AltDeep] Stream complete for index', index);
-      // Update cache with final HTML (rule-based + AI content)
-      var altForCache = _altDataCache[index];
-      if (altForCache && currentReport) {
-        var fcCache = altForCache.code_full || (altForCache.code && altForCache.code.startsWith('6') ? altForCache.code + '.SH' : altForCache.code + '.SZ');
-        var ck = (currentReport.code || '') + '_' + (fcCache || '');
-        _altDeepCache[ck] = { html: panel.innerHTML, streamHtml: '' };
-      }
+      // Mark cache as complete
+      _altDeepCache[ck].completed = true;
+      console.log('[AltDeep] Stream complete for index', index + ' — cached to ' + ck);
     } catch (err) {
       if (err.name === 'AbortError') { console.log('[AltDeep] Stream aborted for index', index); return; }
       console.error('[AltDeep] Stream error:', err);

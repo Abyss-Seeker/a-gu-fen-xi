@@ -418,10 +418,30 @@ def get_financial_data(code):
                 "加权ROE": r.get("WEIGHTAVG_ROE"),
             })
 
+    # ---- Fetch gross/net margins from main finance data ----
+    margins_raw = _em_fetch(
+        "RPT_F10_FINANCE_MAINFINADATA",
+        "XSMLL,XSJLL",
+        security_filter,
+        pagesize=1,
+    )
+    gross_margin = None
+    net_margin = None
+    if margins_raw:
+        mr = margins_raw[0]
+        gm = mr.get("XSMLL")
+        nm = mr.get("XSJLL")
+        if gm is not None and float(gm) != 0:
+            gross_margin = round(float(gm), 2)
+        if nm is not None and float(nm) != 0:
+            net_margin = round(float(nm), 2)
+
     return {
         "income": income,
         "balance": balance,
         "quarterly": quarterly_income,
+        "gross_margin": gross_margin,
+        "net_margin": net_margin,
     }
 
 
@@ -1333,6 +1353,33 @@ def analyze_stock(code):
         if not dividends:
             value_detail["dividend_note"] = "无分红记录"
         value_breakdown.append({"item": "股息率", "change": 0, "score_after": value_score, "detail": "无分红数据或每股分红为0"})
+
+    # ---- 毛利率 (Gross Margin) & 净利率 (Net Margin) ----
+    gross_margin = financial.get("gross_margin")
+    net_margin = financial.get("net_margin")
+
+    if gross_margin is not None or net_margin is not None:
+        if gross_margin is not None:
+            value_detail["gross_margin"] = gross_margin
+        else:
+            value_detail["gross_margin"] = None
+        if net_margin is not None:
+            value_detail["net_margin"] = net_margin
+        else:
+            value_detail["net_margin"] = None
+
+        # Score bonus for high margins
+        if gross_margin is not None and gross_margin > 50:
+            value_score += 1
+            value_breakdown.append({"item": "毛利率", "change": +1, "score_after": value_score,
+                "detail": f"规则: if 毛利率>50%: +1分\n当前: 毛利率={gross_margin:.1f}% > 50% → +1分"})
+        if net_margin is not None and net_margin > 15:
+            value_score += 1
+            value_breakdown.append({"item": "净利率", "change": +1, "score_after": value_score,
+                "detail": f"规则: if 净利率>15%: +1分\n当前: 净利率={net_margin:.1f}% > 15% → +1分"})
+    else:
+        value_detail["gross_margin"] = None
+        value_detail["net_margin"] = None
 
     # PE-based valuation
     if pe > 0 and pe < 15:

@@ -703,6 +703,8 @@
         <div class="stat-item"><div class="stat-label">股息率(最新)</div><div class="stat-value ${dY > 3 ? 'trend-up' : ''}">${dY > 0 ? dY.toFixed(2) + '%' : '--'}</div></div>
         <div class="stat-item"><div class="stat-label">每股分红</div><div class="stat-value">${dCash > 0 ? dCash.toFixed(2) + ' 元' : '--'}</div></div>
         <div class="stat-item"><div class="stat-label">ROE</div><div class="stat-value">${Number(roe).toFixed(2)}%</div></div>
+        <div class="stat-item"><div class="stat-label">毛利率</div><div class="stat-value">${vd.gross_margin != null ? vd.gross_margin.toFixed(2) + '%' : '--'}</div></div>
+        <div class="stat-item"><div class="stat-label">净利率</div><div class="stat-value">${vd.net_margin != null ? vd.net_margin.toFixed(2) + '%' : '--'}</div></div>
         <div class="stat-item"><div class="stat-label">PE估值</div><div class="stat-value" style="font-size:0.9rem">${r.pe > 0 ? r.pe.toFixed(1) : '亏损'}</div></div>
         ${peg !== undefined ? `<div class="stat-item"><div class="stat-label">PEG</div><div class="stat-value ${peg < 1 ? 'trend-up' : 'trend-down'}">${peg.toFixed(2)}</div></div>` : ''}
         ${pegAssess ? `<div class="stat-item"><div class="stat-label">PEG评估</div><div class="stat-value" style="font-size:0.8rem">${pegAssess}</div></div>` : ''}
@@ -1113,6 +1115,42 @@
 
       _logFallbackInfo('替代标的(基础)', baseData, baseResp);
 
+      // ---- Mode completeness check ----
+      // [EXPAND] If adding more modes in the future, add them to this list
+      var ALL_MODES = ['industry', 'price_similar', 'recommended'];
+      var emptyModes = [];
+      ALL_MODES.forEach(function(m) {
+        if ((_altCache[m] || []).length === 0) {
+          emptyModes.push(m);
+        }
+      });
+      if (emptyModes.length > 0) {
+        console.warn(
+          '%c[Alt] ⚠️ ' + emptyModes.length + ' 个模式无数据: ' + emptyModes.join(', '),
+          'color:#ffa500;font-weight:bold'
+        );
+        // If price_similar is empty, try to get it from the legacy /all endpoint
+        if (emptyModes.indexOf('price_similar') >= 0 || emptyModes.indexOf('recommended') >= 0) {
+          console.log('%c[Alt] 尝试回退加载缺失的模式...', 'color:#3b82f6');
+          try {
+            var fbResp = await fetch('/api/alternatives/all', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ code: code }),
+            });
+            var fbData = await fbResp.json();
+            emptyModes.forEach(function(m) {
+              if (fbData[m] && fbData[m].length > 0) {
+                _altCache[m] = fbData[m];
+                console.log('%c[Alt] ✅ 回退成功加载 ' + m + ': ' + fbData[m].length + ' 只', 'color:#44bb44');
+              }
+            });
+          } catch (fbErr) {
+            console.warn('[Alt] 回退加载失败:', fbErr.message);
+          }
+        }
+      }
+
       // Render cards with lightweight scores + "计算中" badge
       renderAltContent();
 
@@ -1120,9 +1158,10 @@
       showCacheInfo();
 
       // Step 2: Collect all codes for full scoring
+      // [EXPAND] If adding more modes, update ALL_MODES above
       var allCodes = [];
       var seen = {};
-      ['industry', 'price_similar', 'recommended'].forEach(function(mode) {
+      ALL_MODES.forEach(function(mode) {
         (_altCache[mode] || []).forEach(function(a) {
           var fc = a.code_full || (a.code && a.code.startsWith('6') ? a.code + '.SH' : a.code + '.SZ');
           if (fc && !seen[fc]) {

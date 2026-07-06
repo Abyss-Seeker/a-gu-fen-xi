@@ -388,7 +388,7 @@
         <div class="section-body">
           <div class="alt-tabs">
             <button class="alt-tab active" data-alt-mode="industry">🏭 同板块</button>
-            <button class="alt-tab" data-alt-mode="price">💰 相似股价</button>
+            <button class="alt-tab" data-alt-mode="price_similar">💰 相似股价</button>
             <button class="alt-tab" data-alt-mode="recommended">⭐ 综合推荐</button>
           </div>
           <div id="altContent"><p style="color:var(--text-secondary)">正在加载替代标的...</p></div>

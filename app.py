@@ -265,12 +265,14 @@ def get_price_history(code, days=250):
     except Exception as e:
         print(f"[get_price_history] EastMoney failed: {e}")
 
-    # ---- Layer 2: Tencent K-line (fallback) ----
+    # ---- Layer 2: Tencent K-line (fallback, max ~640 bars) ----
     try:
         tc = _tencent_code(code)
+        # Request 800 to get max available (~640 for most stocks, ~2.5 years)
+        tc_days = max(days, 800)
         kline_url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
         params = {
-            "param": f"{tc},day,,,{days + 30},qfq",
+            "param": f"{tc},day,,,{tc_days + 30},qfq",
             "_": str(int(time.time() * 1000)),
         }
         resp = _http_get(kline_url, params=params, timeout=15)
@@ -284,7 +286,7 @@ def get_price_history(code, days=250):
             return []
 
         result = []
-        for k in klines[-days:]:
+        for k in klines:
             result.append({
                 "日期": k[0],
                 "开盘": float(k[1]),

@@ -384,30 +384,30 @@
       <div class="report-section" id="altSection">
         <div class="section-header" onclick="this.nextElementSibling.classList.toggle('collapsed')">
           <h3>🔄 替代标的推荐</h3>
-          <div class="alt-llm-toggle">
-            <label class="alt-llm-label">
-              <input type="checkbox" class="alt-llm-check" id="altNoLLMCheck">
-              <span>不使用LLM深度分析</span>
-            </label>
-            <span class="alt-llm-info" id="altLLMInfoBtn" title="了解更多">ⓘ</span>
-            <div class="alt-llm-popup" id="altLLMInfoPopup" style="display:none">
-              <div class="alt-llm-popup-inner">
-                <b>关于LLM深度分析</b><br><br>
-                勾选此选项后，点击「深度对比」将仅展示基于规则的维度对比分析（PE、PB、ROE、PEG等），<b>不再调用AI大模型</b>进行辩论式分析和综合评价。<br><br>
-                适用场景：<br>
-                · 网络不稳定或LLM API不可用时<br>
-                · 希望快速查看规则化数据对比<br>
-                · 节省API调用额度<br><br>
-                取消勾选即可恢复完整AI分析。
-              </div>
-            </div>
-          </div>
         </div>
         <div class="section-body">
           <div class="alt-tabs">
             <button class="alt-tab active" data-alt-mode="industry">🏭 同板块</button>
             <button class="alt-tab" data-alt-mode="price_similar">💰 相似股价</button>
             <button class="alt-tab" data-alt-mode="recommended">⭐ 综合推荐</button>
+            <div class="alt-llm-toggle">
+              <label class="alt-llm-label">
+                <input type="checkbox" class="alt-llm-check" id="altNoLLMCheck">
+                <span>不使用LLM深度分析</span>
+              </label>
+              <span class="alt-llm-info" id="altLLMInfoBtn" title="了解更多">ⓘ</span>
+              <div class="alt-llm-popup" id="altLLMInfoPopup" style="display:none">
+                <div class="alt-llm-popup-inner">
+                  <b>关于LLM深度分析</b><br><br>
+                  勾选此选项后，点击「深度对比」将仅展示基于规则的维度对比分析（PE、PB、ROE、PEG等），<b>不再调用AI大模型</b>进行辩论式分析和综合评价。<br><br>
+                  适用场景：<br>
+                  · 网络不稳定或LLM API不可用时<br>
+                  · 希望快速查看规则化数据对比<br>
+                  · 节省API调用额度<br><br>
+                  取消勾选即可恢复完整AI分析。
+                </div>
+              </div>
+            </div>
           </div>
           <div id="altContent"><p style="color:var(--text-secondary)">正在加载替代标的...</p></div>
         </div>

@@ -773,14 +773,26 @@
       var c = parseFloat(bar['收盘']) || 0;
       var h = parseFloat(bar['最高']) || 0;
       var l = parseFloat(bar['最低']) || 0;
+      var minVal = Math.min(o, c, h, l);
+      var maxVal = Math.max(o, c, h, l);
+      var avgVal = (o + c + h + l) / 4;
+      // Check relative consistency
       if (h < l || h < Math.max(o, c) - 0.001 || l > Math.min(o, c) + 0.001) {
-        badBars.push({i: bi, date: bar['日期'], o: o, c: c, h: h, l: l});
+        badBars.push({i: bi, date: bar['日期'], o: o, c: c, h: h, l: l, reason: 'OHLC逻辑错误'});
+      }
+      // Check absolute consistency: no value should be 50x away from the average
+      else if (maxVal > 0 && (maxVal / Math.max(minVal, 0.01) > 50)) {
+        badBars.push({i: bi, date: bar['日期'], o: o, c: c, h: h, l: l, reason: '数值异常(50x偏离)'});
+      }
+      // Check open specifically: should not be 10x away from close
+      else if (c > 0 && Math.abs(o - c) / c > 10) {
+        badBars.push({i: bi, date: bar['日期'], o: o, c: c, h: h, l: l, reason: 'open/close偏离10x+'});
       }
     }
     if (badBars.length > 0) {
       console.warn('%c[K线] ⚠️ ' + badBars.length + ' 条异常OHLC数据:', 'color:#ff4444');
-      badBars.slice(0, 5).forEach(function(b) {
-        console.warn('  [' + b.i + '] ' + b.date + ' 开=' + b.o + ' 收=' + b.c + ' 高=' + b.h + ' 低=' + b.l);
+      badBars.slice(0, 10).forEach(function(b) {
+        console.warn('  [' + b.i + '] ' + b.date + ' 开=' + b.o + ' 收=' + b.c + ' 高=' + b.h + ' 低=' + b.l + ' (' + b.reason + ')');
       });
     } else {
       console.log('%c[K线] ✅ 全部' + prices.length + '条OHLC数据合法', 'color:#44bb44');
@@ -849,18 +861,46 @@
         formatter: function(params) {
           if (!params || params.length === 0) return '';
           var idx = params[0].dataIndex;
-          var html = '<div style="font-size:13px"><b>' + dates[idx] + '</b><br/>';
+          if (idx < 0 || idx >= prices.length) return '';
+
+          // Read directly from raw data — never trust ECharts internal state
+          var d = prices[idx];
+          var o = parseFloat(d['开盘']) || 0;
+          var c = parseFloat(d['收盘']) || 0;
+          var h = parseFloat(d['最高']) || 0;
+          var l = parseFloat(d['最低']) || 0;
+          var date = d['日期'] || '';
+
+          var html = '<div style="font-size:13px"><b>' + date + '</b><br/>';
+
+          // Detect anomalies in this bar
+          var avg = (o + c + h + l) / 4;
+          var isAnomaly = false;
+          var anomalyReason = '';
+          if (h < l) {
+            isAnomaly = true; anomalyReason = '高<低';
+          } else if (avg > 0 && (Math.max(o,c,h,l) / Math.max(Math.min(o,c,h,l), 0.01) > 50)) {
+            isAnomaly = true; anomalyReason = '数值偏离';
+          } else if (c > 0 && Math.abs(o - c) / c > 10) {
+            isAnomaly = true; anomalyReason = '开收偏离';
+          }
+
+          if (isAnomaly) {
+            html += '<span style="color:#ff4444;font-weight:bold">⚠️ 数据异常(' + anomalyReason + ')</span><br/>';
+          }
+
+          html += '<span style="color:#ef4444">● K线</span> ' +
+            '开:' + o.toFixed(2) + ' 收:' + c.toFixed(2) + ' 低:' + l.toFixed(2) + ' 高:' + h.toFixed(2) + '<br/>';
+
+          // Add MA lines
           for (var k = 0; k < params.length; k++) {
             var p = params[k];
-            if (p.seriesName === 'Volume') continue;
-            var color = p.color || '#333';
-            var val = p.value;
-            if (typeof val === 'object' && val.length >= 4) {
-              html += '<span style="color:' + color + '">● ' + p.seriesName + '</span> 开:' + val[0].toFixed(2) + ' 收:' + val[1].toFixed(2) + ' 低:' + val[2].toFixed(2) + ' 高:' + val[3].toFixed(2) + '<br/>';
-            } else if (typeof val === 'number') {
-              html += '<span style="color:' + color + '">● ' + p.seriesName + '</span> ' + val.toFixed(2) + '<br/>';
+            if (p.seriesName === 'Volume' || p.seriesName === 'K线') continue;
+            if (typeof p.value === 'number' && p.value !== '-') {
+              html += '<span style="color:' + (p.color || '#333') + '">● ' + p.seriesName + '</span> ' + p.value.toFixed(2) + '<br/>';
             }
           }
+
           html += '</div>';
           return html;
         }

@@ -616,6 +616,30 @@ def static_get_industry_for_code(code):
     return None
 
 
+def static_get_cross_industry_peers(code, limit=30):
+    """
+    Last-resort fallback: return stocks from the static pool across ALL industries.
+    Excludes the primary stock. Guaranteed to never return empty.
+    
+    Returns: list of {code, name, wc}
+    """
+    symbol = code.replace(".SZ", "").replace(".SH", "").replace(".BJ", "")
+    result = []
+    all_stocks = []
+    for cat, stocks in STATIC_PEERS.items():
+        for c, n, wc in stocks:
+            if c != symbol:
+                all_stocks.append({"code": c, "name": n, "wc": wc})
+
+    # Take first 'limit' stocks — they're organized by industry, so we get
+    # reasonable diversification
+    result = all_stocks[:limit]
+
+    _log("static_get_cross_industry_peers", "static", True,
+         f"Cross-industry fallback: {len(result)} peers for {code}")
+    return result
+
+
 # ==============================
 # 6. Graceful degradation for money flow
 # ==============================

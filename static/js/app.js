@@ -1150,8 +1150,8 @@
           '%c[Alt] ⚠️ ' + emptyModes.length + ' 个模式无数据: ' + emptyModes.join(', '),
           'color:#ffa500;font-weight:bold'
         );
-        // If price_similar is empty, try to get it from the legacy /all endpoint
-        if (emptyModes.indexOf('price_similar') >= 0 || emptyModes.indexOf('recommended') >= 0) {
+        // Try to get missing modes from the legacy /all endpoint
+        if (emptyModes.indexOf('industry') >= 0 || emptyModes.indexOf('price_similar') >= 0 || emptyModes.indexOf('recommended') >= 0) {
           console.log('%c[Alt] 尝试回退加载缺失的模式...', 'color:#3b82f6');
           try {
             var fbResp = await fetch('/api/alternatives/all', {

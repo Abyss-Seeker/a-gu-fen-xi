@@ -1716,6 +1716,11 @@ def find_alternatives(code):
             )
             print(f"[find_alternatives] Method3 (static) found {len(peers)} peers for {code}")
 
+        # Method 4: Last resort — cross-industry fallback from static pool
+        if not peers:
+            peers = api_fallback.static_get_cross_industry_peers(code, limit=30)
+            print(f"[find_alternatives] Method4 (cross-industry) found {len(peers)} peers for {code}")
+
         if not peers:
             print(f"[find_alternatives] No peers found for {code}")
             cache_set(cache_key, [])

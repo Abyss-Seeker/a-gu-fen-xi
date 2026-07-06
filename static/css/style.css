@@ -1258,6 +1258,9 @@ body {
   max-width: 300px;
   min-width: 240px;
 }
+/* Allow popup to escape section overflow clipping */
+#altSection { overflow: visible; }
+#altSection .section-body { overflow: visible; }
 .alt-llm-popup-inner {
   padding: 14px 16px;
   font-size: 0.75rem;

@@ -29,11 +29,48 @@ import numpy as np
 import pandas as pd
 from flask import Flask, request, jsonify, render_template, send_from_directory, Response
 
+# API fallback module
+import api_fallback
+
 # ----- Trust no proxy: create a dedicated session that never touches system proxy settings -----
 _http_session = requests.Session()
 _http_session.trust_env = False
 
 app = Flask(__name__)
+
+
+# ---- After-request hook: inject API fallback status header ----
+@app.after_request
+def add_fallback_header(response):
+    """Add X-API-Fallback header so frontend JS can detect fallback usage."""
+    recent = api_fallback.get_fallback_log()
+    if recent:
+        # Get the last few events from current request context
+        # We use a simple heuristic: events from the last 5 seconds
+        now = datetime.now()
+        recent_events = []
+        for e in reversed(recent):
+            try:
+                et = datetime.strptime(e["time"], "%H:%M:%S").replace(
+                    year=now.year, month=now.month, day=now.day
+                )
+                if (now - et).total_seconds() < 30:
+                    recent_events.append(e)
+            except ValueError:
+                pass
+            if len(recent_events) >= 10:
+                break
+
+        if recent_events:
+            # Minimal header: count and key events
+            fb_sources = set(e["source"] for e in recent_events if not e["ok"])
+            fb_count = sum(1 for e in recent_events if e["source"] != "primary")
+            header_val = f"fb={fb_count}"
+            if fb_sources:
+                header_val += f";fail={','.join(sorted(fb_sources))}"
+            response.headers["X-API-Fallback"] = header_val
+
+    return response
 
 # ---------- Config ----------
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
@@ -186,8 +223,19 @@ def get_stock_info(code):
         cache_set(cache_key, info)
         return info
     except Exception as e:
-        print(f"Error fetching stock info for {code}: {e}")
-        return {}
+        print(f"[PRIMARY] Error fetching stock info for {code}: {e}")
+
+    # ---- Fallback: Sina Finance ----
+    try:
+        fb_info = api_fallback.sina_get_stock_info(code)
+        if fb_info and fb_info.get("最新价"):
+            fb_info["_fb_source"] = "sina"
+            cache_set(cache_key, fb_info)
+            return fb_info
+    except Exception as fe:
+        print(f"[FALLBACK] Sina also failed for {code}: {fe}")
+
+    return {}
 
 
 def get_price_history(code, days=250):
@@ -235,8 +283,18 @@ def get_price_history(code, days=250):
         cache_set(cache_key, result)
         return result
     except Exception as e:
-        print(f"Error fetching price history for {code}: {e}")
-        return []
+        print(f"[PRIMARY] Error fetching price history for {code}: {e}")
+
+    # ---- Fallback: EastMoney K-line API ----
+    try:
+        fb_history = api_fallback.em_get_price_history(code, days)
+        if fb_history:
+            cache_set(cache_key, fb_history)
+            return fb_history
+    except Exception as fe:
+        print(f"[FALLBACK] EastMoney kline also failed for {code}: {fe}")
+
+    return []
 
 
 # ---------- EastMoney Datacenter API ----------
@@ -425,7 +483,12 @@ def get_money_flow(code):
         cache_set(cache_key, result)
         return result
     except Exception as e:
-        return {"error": f"资金流向获取失败: {str(e)}"}
+        print(f"[PRIMARY] Money flow error for {code}: {e}")
+
+    # ---- Fallback: Graceful degradation ----
+    fb_result = api_fallback.graceful_money_flow(code)
+    cache_set(cache_key, fb_result)
+    return fb_result
 
 
 def get_news_events(code):
@@ -1524,6 +1587,20 @@ def _batch_get_quotes(wc_codes):
                     continue
         except Exception as e:
             print(f"[_batch_get_quotes] Error: {e}")
+
+    # ---- Fallback: Sina batch quotes ----
+    # If Tencent returned no results, try Sina
+    if not result or len(result) < len(wc_codes) * 0.5:
+        try:
+            fb_quotes = api_fallback.sina_batch_get_quotes(wc_codes)
+            if fb_quotes:
+                # Merge Sina data, but don't overwrite existing Tencent data
+                for wc, q in fb_quotes.items():
+                    if wc not in result:
+                        result[wc] = q
+        except Exception as fe:
+            print(f"[FALLBACK] Sina batch quotes failed: {fe}")
+
     return result
 
 
@@ -1552,6 +1629,16 @@ def find_alternatives(code):
                 if clean_kw and len(clean_kw) >= 2:
                     peers = _tencent_search_peers(symbol, clean_kw)
                     print(f"[find_alternatives] Method2 found {len(peers)} peers for {code}")
+
+        # Method 3: Static industry mapping (offline, always available)
+        if not peers:
+            ind_data = get_industry_data(code)
+            peers = api_fallback.static_get_industry_peers(
+                code,
+                ind_data.get('industry_name', ''),
+                ind_data.get('board_name', '')
+            )
+            print(f"[find_alternatives] Method3 (static) found {len(peers)} peers for {code}")
 
         if not peers:
             print(f"[find_alternatives] No peers found for {code}")
@@ -1668,6 +1755,8 @@ def analyze():
     if "error" in report:
         return jsonify({"error": report["error"]}), 400
 
+    # Attach fallback meta for console debugging
+    report["_meta"] = {"fb": api_fallback.get_fallback_log()[-10:]}
     return jsonify(report)
 
 
@@ -1679,7 +1768,10 @@ def alternatives():
         return jsonify({"error": "请输入股票代码"}), 400
 
     alts = find_alternatives(code)
-    return jsonify({"alternatives": alts})
+    return jsonify({
+        "alternatives": alts,
+        "_meta": {"fb": api_fallback.get_fallback_log()[-10:]}
+    })
 
 
 @app.route("/api/chat", methods=["POST"])
@@ -2629,10 +2721,21 @@ def _get_market_indices():
             print(f"Error fetching index {name}: {e}")
 
     cache_set(cache_key, result)
+
+    # ---- Fallback: Sina indices ----
+    if not result or len(result) < 2:
+        try:
+            fb_result = api_fallback.sina_get_market_indices()
+            if fb_result:
+                # Merge Sina data into missing keys
+                for key, val in fb_result.items():
+                    if key not in result:
+                        result[key] = val
+        except Exception as fe:
+            print(f"[FALLBACK] Sina indices failed: {fe}")
+
+    cache_set(cache_key, result)
     return result
-
-
-@app.route("/api/deep_cache_clear", methods=["POST"])
 def deep_cache_clear():
     """Clear deep analysis cache for a specific stock or all."""
     data = request.json
@@ -2654,8 +2757,39 @@ def deep_cache_clear():
 def health():
     return jsonify({
         "status": "ok",
-        "data_source": "westock-data + EastMoney",
+        "data_source": "Tencent + EastMoney + Sina(fallback)",
         "time": datetime.now().isoformat(),
+    })
+
+
+@app.route("/api/fallback_status")
+def fallback_status():
+    """Debug endpoint: show recent API fallback events."""
+    since = request.args.get("since", type=int)
+    log_entries = api_fallback.get_fallback_log(since)
+    primary_count = 0
+    fallback_count = 0
+    fail_count = 0
+    sources = {}
+    for entry in log_entries:
+        if entry["source"] == "primary":
+            primary_count += 1
+        elif entry["ok"]:
+            fallback_count += 1
+        else:
+            fail_count += 1
+        sources[entry["source"]] = sources.get(entry["source"], 0) + 1
+
+    return jsonify({
+        "summary": {
+            "total_events": len(log_entries),
+            "primary_ok": primary_count,
+            "fallback_ok": fallback_count,
+            "fallback_fail": fail_count,
+        },
+        "sources": sources,
+        "recent": log_entries[-20:],
+        "_next_since": len(api_fallback.FALLBACK_LOG),
     })
 
 

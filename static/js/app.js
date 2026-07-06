@@ -82,6 +82,7 @@
         body: JSON.stringify({ code }),
       });
       const data = await resp.json();
+      _logFallbackInfo('报告分析', data, resp);
       if (data.error) {
         alert(data.error);
         return;
@@ -697,6 +698,53 @@
   // Store alternatives data globally for deep analysis
   let _altDataCache = [];
 
+  /**
+   * Log API fallback info to browser console with color coding.
+   * Called after every /api/analyze and /api/alternatives response.
+   */
+  function _logFallbackInfo(label, data, resp) {
+    const fbEvents = (data && data._meta && data._meta.fb) || [];
+    const fbHeader = resp && resp.headers.get('X-API-Fallback');
+
+    if (!fbHeader && fbEvents.length === 0) return;
+
+    const hasFailures = fbHeader && fbHeader.includes('fail=');
+    const bgColor = hasFailures ? '#ff6b35' : '#4ecdc4';
+    const textColor = hasFailures ? '#fff' : '#000';
+
+    console.groupCollapsed(
+      `%c🔧 ${label} API Fallback %c${fbHeader || ''}`,
+      `background:${bgColor};color:${textColor};padding:2px 6px;border-radius:3px;font-weight:bold`,
+      'color:#888;font-size:0.85em'
+    );
+
+    // Show failed APIs
+    const failedSources = [];
+    fbEvents.forEach(function(e) {
+      if (!e.ok) {
+        failedSources.push(e.source + ':' + e.func);
+      }
+    });
+    if (failedSources.length > 0) {
+      console.log('%c❌ 失败的 API 源:', 'color:#ff4444;font-weight:bold', failedSources.join(', '));
+    }
+
+    // Show successful fallbacks
+    const fallbackSources = fbEvents.filter(function(e) { return e.ok && e.source !== 'primary'; });
+    if (fallbackSources.length > 0) {
+      console.log('%c✅ 使用的回退方案:', 'color:#44bb44;font-weight:bold');
+      fallbackSources.forEach(function(e) {
+        console.log('  →', e.source, '|', e.func, '|', e.detail || '');
+      });
+    }
+
+    if (fbEvents.length === 0 && fbHeader) {
+      console.log('%cℹ️ 可能触发回退 (来自响应头)', 'color:#ffaa00');
+    }
+
+    console.groupEnd();
+  }
+
   async function loadAlternatives(code) {
     try {
       const resp = await fetch('/api/alternatives', {
@@ -707,6 +755,7 @@
       const data = await resp.json();
       const alts = data.alternatives || [];
       _altDataCache = alts;
+      _logFallbackInfo('替代标的', data, resp);
       const container = $('#altContent');
       if (!container) return;
 

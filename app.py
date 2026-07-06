@@ -1615,13 +1615,15 @@ def find_alternatives(code):
     try:
         symbol = code.replace('.SZ', '').replace('.SH', '').replace('.BJ', '')
 
+        # Fetch industry data ONCE (cached internally by get_industry_data)
+        ind_data = get_industry_data(code)
+
         # Method 1: Use board_code from get_industry_data (primary)
         peers = _get_industry_peers_by_board(code)
         print(f"[find_alternatives] Method1 found {len(peers)} peers for {code}")
 
         # Method 2: Fallback - search by industry keyword
         if not peers:
-            ind_data = get_industry_data(code)
             board_name = ind_data.get('board_name', '')
             ind_name = ind_data.get('industry_name', '')
             search_kw = board_name or ind_name
@@ -1633,7 +1635,6 @@ def find_alternatives(code):
 
         # Method 3: Static industry mapping (offline, always available)
         if not peers:
-            ind_data = get_industry_data(code)
             peers = api_fallback.static_get_industry_peers(
                 code,
                 ind_data.get('industry_name', ''),
@@ -1646,19 +1647,28 @@ def find_alternatives(code):
             cache_set(cache_key, [])
             return []
 
-        # Batch get quotes from Tencent API
+        # Batch get quotes from Tencent API (with Sina fallback built in)
         peer_codes = [p['wc'] for p in peers[:30]]
         quotes = _batch_get_quotes(peer_codes)
+
+        # Check if quotes are mostly empty (Vercel network issues)
+        has_pe_data = any(q.get('pe', 0) for q in quotes.values())
 
         alternatives = []
         for p in peers[:30]:
             wc = p['wc']
             q = quotes.get(wc, {})
             pe = q.get('pe', 0) or 0
-            if pe <= 0 or pe > 200:
-                continue
-            pb = q.get('pb', 0) or 0
             price = q.get('price', 0) or 0
+
+            # If we have PE data, apply normal PE filter
+            if has_pe_data and (pe <= 0 or pe > 200):
+                continue
+            # If no PE data at all, include stocks with any price data
+            if not has_pe_data and price <= 0:
+                continue
+
+            pb = q.get('pb', 0) or 0
             change = q.get('change_pct', 0) or 0
             mcap = q.get('mcap', 0) or 0
             alternatives.append({
@@ -1677,8 +1687,8 @@ def find_alternatives(code):
             cache_set(cache_key, [])
             return []
 
-        # Sort by PE (low = value)
-        alternatives.sort(key=lambda x: x['pe'])
+        # Sort by PE (low = value), fall back to name if no PE
+        alternatives.sort(key=lambda x: x['pe'] if x['pe'] > 0 else 999)
         top = alternatives[:6]
 
         # Run analyze_stock for each top alternative
@@ -1989,6 +1999,19 @@ def find_recommended(code):
         except:
             same_ind_codes = set()
         same_ind_codes.add(symbol)
+        
+        # ---- Robust exclusion: use code-based category lookup ----
+        # If API data failed and same_ind_codes is just {symbol},
+        # use the static mapping to exclude the entire category
+        if len(same_ind_codes) <= 1:
+            primary_cat = api_fallback.static_get_industry_for_code(code)
+            if primary_cat:
+                for cat, stocks in api_fallback.STATIC_PEERS.items():
+                    if cat == primary_cat:
+                        for c, n, wc in stocks:
+                            same_ind_codes.add(c)
+                        break
+                print(f"[find_recommended] Excluding {len(same_ind_codes)-1} stocks from '{primary_cat}' category")
         
         # Get all candidates from static pool
         all_candidates = _get_all_candidate_codes()

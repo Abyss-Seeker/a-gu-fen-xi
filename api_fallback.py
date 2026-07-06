@@ -574,9 +574,14 @@ def static_get_industry_peers(code, industry_name, board_name):
     Returns: list of {code, name, wc}
     """
     cat = _match_industry_category(industry_name, board_name)
+
+    # Fallback: if API data is empty, look up by code directly
+    if not cat:
+        cat = static_get_industry_for_code(code)
+
     if not cat:
         _log("static_get_industry_peers", "static", False,
-             f"No category match for '{industry_name}' / '{board_name}'")
+             f"No category match for '{industry_name}' / '{board_name}' / code={code}")
         return []
 
     peers_list = STATIC_PEERS.get(cat, [])
@@ -591,6 +596,19 @@ def static_get_industry_peers(code, industry_name, board_name):
     _log("static_get_industry_peers", "static", True,
          f"Category='{cat}', {len(result)} peers for {code}")
     return result
+
+
+def static_get_industry_for_code(code):
+    """
+    Reverse lookup: find which industry category a stock code belongs to.
+    Returns category name string or None.
+    """
+    symbol = code.replace(".SZ", "").replace(".SH", "").replace(".BJ", "")
+    for cat, stocks in STATIC_PEERS.items():
+        for c, n, wc in stocks:
+            if c == symbol:
+                return cat
+    return None
 
 
 # ==============================

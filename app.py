@@ -1411,11 +1411,30 @@ def analyze_stock(code):
         value_score -= 4
         value_breakdown.append({"item": "ROE盈利能力", "change": -4, "score_after": value_score, "detail": f"规则: if ROE>12%: +3分; elif >6%: +1分; elif <=0%: -4分\n当前: ROE={fin_roe_v:.1f}% <= 0 → -4分"})
 
-    # PEG estimation (if revenue growth available)
+    # PEG estimation (use revenue growth → EPS growth → net profit YoY as fallbacks)
     rev_growth = fund_detail.get("revenue_growth")
-    if rev_growth and rev_growth > 0 and pe > 0:
-        peg = pe / rev_growth
-        value_detail["peg"] = round(peg, 2)
+    np_yoy = None
+    eps_yoy = None
+    income_rows_for_peg = financial.get("income", [])
+    if income_rows_for_peg and len(income_rows_for_peg) >= 2:
+        eps0 = income_rows_for_peg[0].get("基本每股收益")
+        eps1 = income_rows_for_peg[1].get("基本每股收益")
+        if eps0 is not None and eps1 is not None and float(eps1) != 0:
+            eps_yoy = (float(eps0) - float(eps1)) / abs(float(eps1)) * 100
+        np_yoy = income_rows_for_peg[0].get("净利同比")
+
+    # Try multiple growth sources, prefer revenue > EPS > net profit
+    growth_rate = None
+    if rev_growth and rev_growth > 0:
+        growth_rate = rev_growth
+    elif eps_yoy and eps_yoy > 0:
+        growth_rate = eps_yoy
+    elif np_yoy and float(np_yoy) > 0:
+        growth_rate = float(np_yoy)
+
+    if growth_rate and growth_rate > 0 and pe > 0:
+        peg = round(pe / growth_rate, 2)
+        value_detail["peg"] = peg
         if peg < 1:
             value_score += 2
             value_detail["peg_assessment"] = "PEG<1，成长性被低估"
@@ -2305,6 +2324,9 @@ def alternatives_score():
                 try:
                     analysis = future.result(timeout=8)
                     if analysis and "error" not in analysis:
+                        # Extract financial metrics for deep comparison
+                        fund_detail = (analysis.get("scores", {}).get("fundamental", {}).get("detail", {}) or {})
+                        value_detail = (analysis.get("scores", {}).get("value", {}).get("detail", {}) or {})
                         scores.append({
                             "code": stock_code,
                             "code_full": stock_code,
@@ -2313,6 +2335,11 @@ def alternatives_score():
                             "max_score": analysis.get("max_score", 100),
                             "recommendation": analysis.get("recommendation", ""),
                             "scores_breakdown": analysis.get("scores", {}),
+                            "pe": analysis.get("pe", 0),
+                            "pb": analysis.get("pb", 0),
+                            "roe": fund_detail.get("latest_roe") or fund_detail.get("roe", 0),
+                            "dividend_yield": fund_detail.get("dividend_yield", 0),
+                            "peg": value_detail.get("peg"),  # None if can't calc (negative growth)
                             "source": "full",
                         })
                     else:

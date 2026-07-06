@@ -1208,8 +1208,11 @@
                     a.total_score = s.total_score;
                     a.recommendation = s.recommendation;
                     a.scores_breakdown = s.scores_breakdown;
+                    a.pe = s.pe || 0;
+                    a.pb = s.pb || 0;
                     a.roe = s.roe || 0;
                     a.dividend_yield = s.dividend_yield || 0;
+                    a.peg = s.peg;  // may be null (neg growth → no PEG)
                   }
                 });
               });
@@ -1471,6 +1474,26 @@
       '</p>';
 
     _altDataCache = alts;
+
+    // Auto-expand cached deep comparisons
+    if (currentReport && Object.keys(_altDeepCache).length > 0) {
+      for (var di = 0; di < alts.length; di++) {
+        var altItem = alts[di];
+        var altFc = altItem.code_full || (altItem.code && altItem.code.startsWith('6') ? altItem.code + '.SH' : altItem.code + '.SZ');
+        var ck = (currentReport.code || '') + '_' + (altFc || '');
+        var cached = _altDeepCache[ck];
+        if (cached && cached.html) {
+          var panel = document.getElementById('altDeepPanel' + di);
+          var arrow = document.getElementById('altDeepArrow' + di);
+          if (panel) {
+            panel.innerHTML = cached.html;
+            panel.style.display = 'block';
+            if (arrow) arrow.textContent = '▴';
+            console.log('%c[Alt Deep] 自动展开缓存: ' + ck, 'color:#44bb44');
+          }
+        }
+      }
+    }
   }
 
   // ---- Event delegation: alt-tab clicks ----

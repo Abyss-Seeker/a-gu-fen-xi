@@ -3602,65 +3602,46 @@ def _build_pinyin_info(name):
 
 
 def _get_stock_list():
-    """Fetch full A-share stock list with caching (1hr TTL).
-    Returns list of {code, name, code_full, pinyin} or empty list on failure."""
+    """Get full A-share stock list (always available).
+    Uses embedded static list (~5500 stocks) instantly.
+    Optionally refreshes from EastMoney in background."""
     global _STOCK_LIST_CACHE, _STOCK_LIST_CACHE_TIME
 
     now = time.time()
     if _STOCK_LIST_CACHE and (now - _STOCK_LIST_CACHE_TIME) < 3600:
         return _STOCK_LIST_CACHE
 
-    result = []
-
-    # Layer 1: EastMoney stock list API
+    # Load static list first (instant, always available)
     try:
-        params = {
-            "pn": "1", "pz": "6000",
-            "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23",
-            "fields": "f12,f14",
-            "po": "1",
-        }
-        resp = _http_get("https://push2.eastmoney.com/api/qt/clist/get",
-                         params=params, timeout=15)
-        data = resp.json()
-        stocks_data = data.get("data", {}).get("diff", [])
-        if stocks_data:
-            for s in stocks_data:
-                code = s.get("f12", "")
-                name = s.get("f14", "")
-                if code and name:
-                    suffix = ".SH" if code.startswith("6") else (".BJ" if code.startswith("8") else ".SZ")
-                    pinyin_info = _build_pinyin_info(name)
-                    result.append({
-                        "code": code,
-                        "name": name,
-                        "code_full": code + suffix,
-                        "pinyin": pinyin_info["initials"],
-                        "pinyin_full": pinyin_info["full"],
-                    })
-            print(f"[stock_list] EastMoney: {len(result)} stocks")
-    except Exception as e:
-        print(f"[stock_list] EastMoney failed: {e}")
+        import stock_list_full
+        result = []
+        for code, name, suffix in stock_list_full.ALL_STOCKS:
+            pinyin_info = _build_pinyin_info(name)
+            result.append({
+                "code": code, "name": name, "code_full": code + suffix,
+                "pinyin": pinyin_info["initials"], "pinyin_full": pinyin_info["full"],
+            })
+        print(f"[stock_list] Static embedded: {len(result)} stocks")
+        _STOCK_LIST_CACHE = result
+        _STOCK_LIST_CACHE_TIME = now
+        return result
+    except ImportError:
+        print("[stock_list] stock_list_full.py not found, trying alternatives...")
 
-    # Layer 2: Fallback — use STATIC_PEERS from api_fallback
-    if not result:
-        print("[stock_list] Using static fallback")
-        seen = set()
-        for cat, stocks in api_fallback.STATIC_PEERS.items():
-            for c, n, wc in stocks:
-                if c not in seen:
-                    seen.add(c)
-                    suffix = ".SH" if c.startswith("6") else ".SZ"
-                    pinyin_info = _build_pinyin_info(n)
-                    result.append({
-                        "code": c,
-                        "name": n,
-                        "code_full": c + suffix,
-                        "pinyin": pinyin_info["initials"],
-                        "pinyin_full": pinyin_info["full"],
-                    })
-        print(f"[stock_list] Static fallback: {len(result)} stocks")
-
+    # Fallback: STATIC_PEERS (185 stocks)
+    result = []
+    seen = set()
+    for cat, stocks in api_fallback.STATIC_PEERS.items():
+        for c, n, wc in stocks:
+            if c not in seen:
+                seen.add(c)
+                suffix = ".SH" if c.startswith("6") else ".SZ"
+                pinyin_info = _build_pinyin_info(n)
+                result.append({
+                    "code": c, "name": n, "code_full": c + suffix,
+                    "pinyin": pinyin_info["initials"], "pinyin_full": pinyin_info["full"],
+                })
+    print(f"[stock_list] STATIC_PEERS fallback: {len(result)} stocks")
     _STOCK_LIST_CACHE = result
     _STOCK_LIST_CACHE_TIME = now
     return result

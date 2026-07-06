@@ -594,6 +594,11 @@ body {
   border-radius: 10px;
   border: 1px solid rgba(59,130,246,0.2);
 }
+.stock-title-time {
+  font-size: 0.68rem;
+  color: #94a3b8;
+  margin-top: 3px;
+}
 .stock-title-right {
   flex-shrink: 0;
   text-align: right;
@@ -1145,4 +1150,59 @@ body {
   color: #ccc;
   line-height: 1.5;
   margin: 0;
+}
+
+/* K-line Chart */
+.kline-ma-legend {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  padding: 8px 0 4px;
+  flex-wrap: wrap;
+}
+.ma-dot {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 10px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: #fff;
+}
+.ma-dot.ma5  { background: #ff6b6b; }
+.ma-dot.ma10 { background: #ffa502; }
+.ma-dot.ma20 { background: #7bed9f; color: #333; }
+.ma-dot.ma30 { background: #70a1ff; }
+.ma-dot.ma60 { background: #a29bfe; }
+.ma-dot.ma120{ background: #fd79a8; }
+.ma-dot.ma250{ background: #00b894; }
+
+/* Alternatives Tabs */
+.alt-tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 2px solid var(--border);
+}
+.alt-tab {
+  padding: 6px 16px;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  background: #f8f9fa;
+  cursor: pointer;
+  font-size: 0.82rem;
+  font-weight: 500;
+  transition: all 0.2s;
+  color: var(--text-secondary);
+}
+.alt-tab:hover {
+  background: #e8f4fd;
+  border-color: #3b82f6;
+  color: #3b82f6;
+}
+.alt-tab.active {
+  background: #3b82f6;
+  border-color: #3b82f6;
+  color: #fff;
+  font-weight: 600;
 }

@@ -833,6 +833,7 @@ def analyze_stock(code):
         "circ_mv": circ_mv,
         "change_pct": change_pct,
         "report_time": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "prices_data": prices_data,  # K-line data for chart rendering
         "scores": {},
     }
 
@@ -1721,6 +1722,323 @@ def find_alternatives(code):
         traceback.print_exc()
         return []
 
+
+# ============================================================
+# Lightweight Scoring & Multi-mode Alternatives
+# ============================================================
+
+def _get_all_candidate_codes():
+    """Return all stock codes from the static industry mapping in api_fallback.
+    Returns deduplicated list of (code, name, wc) tuples."""
+    seen = set()
+    candidates = []
+    for cat, stocks in api_fallback.STATIC_PEERS.items():
+        for c, n, wc in stocks:
+            if c not in seen:
+                seen.add(c)
+                candidates.append((c, n, wc))
+    return candidates
+
+
+def _lightweight_score(candidate, context=None):
+    """
+    Pure math scoring — zero API calls, always succeeds.
+    
+    Dimensions:
+      PE score  (0-30): Lower PE = better value
+      PB score  (0-20): Lower PB = better value
+      MCap score(0-15): Larger market cap = more stable
+      Momentum  (0-15): Healthy range preferred
+      Quality   (0-20): ROE + stability composite
+    
+    context: optional dict with extra info (e.g., primary stock price for similarity)
+    """
+    pe = candidate.get('pe', 0) or 0
+    pb = candidate.get('pb', 0) or 0
+    mcap = candidate.get('mcap', 0) or candidate.get('market_cap', 0) or 0
+    change = candidate.get('change_pct', 0) or candidate.get('change', 0) or 0
+    name = candidate.get('name', '')
+    
+    score = 0
+    breakdown = {}
+    
+    # 1. PE score (0-30)
+    if 0 < pe <= 8:
+        pe_score = 30
+        pe_note = "极低估值"
+    elif 8 < pe <= 15:
+        pe_score = 25
+        pe_note = "低估值"
+    elif 15 < pe <= 25:
+        pe_score = 20
+        pe_note = "合理偏低"
+    elif 25 < pe <= 40:
+        pe_score = 15
+        pe_note = "合理"
+    elif 40 < pe <= 80:
+        pe_score = 8
+        pe_note = "偏高"
+    elif pe > 80:
+        pe_score = 3
+        pe_note = "极高"
+    else:
+        pe_score = 10
+        pe_note = "PE不可用"
+    score += pe_score
+    breakdown['pe'] = {'score': pe_score, 'note': pe_note, 'value': pe}
+    
+    # 2. PB score (0-20)
+    if 0 < pb <= 1:
+        pb_score = 20
+        pb_note = "破净/极低"
+    elif 1 < pb <= 2:
+        pb_score = 16
+        pb_note = "低PB"
+    elif 2 < pb <= 4:
+        pb_score = 12
+        pb_note = "合理"
+    elif 4 < pb <= 8:
+        pb_score = 7
+        pb_note = "偏高"
+    elif pb > 8:
+        pb_score = 3
+        pb_note = "极高PB"
+    else:
+        pb_score = 8
+        pb_note = "PB不可用"
+    score += pb_score
+    breakdown['pb'] = {'score': pb_score, 'note': pb_note, 'value': pb}
+    
+    # 3. Market cap score (0-15)
+    mcap_yi = mcap / 1e8  # convert to 亿
+    if mcap_yi > 5000:
+        mcap_score = 15
+        mcap_note = "超大盘蓝筹"
+    elif mcap_yi > 1000:
+        mcap_score = 13
+        mcap_note = "大盘"
+    elif mcap_yi > 300:
+        mcap_score = 10
+        mcap_note = "中盘"
+    elif mcap_yi > 100:
+        mcap_score = 7
+        mcap_note = "中小盘"
+    elif mcap_yi > 0:
+        mcap_score = 4
+        mcap_note = "小盘"
+    else:
+        mcap_score = 5
+        mcap_note = "市值未知"
+    score += mcap_score
+    breakdown['mcap'] = {'score': mcap_score, 'note': mcap_note, 'value': round(mcap_yi, 0)}
+    
+    # 4. Momentum score (0-15)
+    if -2 <= change <= 2:
+        momentum_score = 12
+        momentum_note = "走势平稳"
+    elif 2 < change <= 5:
+        momentum_score = 14
+        momentum_note = "温和上涨"
+    elif change > 5:
+        momentum_score = 10
+        momentum_note = "短期过涨"
+    elif -5 <= change < -2:
+        momentum_score = 8
+        momentum_note = "温和下跌"
+    else:
+        momentum_score = 5
+        momentum_note = "短期急跌"
+    score += momentum_score
+    breakdown['momentum'] = {'score': momentum_score, 'note': momentum_note, 'value': change}
+    
+    # 5. Quality / Composite score (0-20)
+    quality_score = 10  # baseline
+    
+    # Blue chip names get bonus
+    blue_chip_names = ['贵州茅台', '五粮液', '中国平安', '招商银行', '美的集团',
+                       '格力电器', '长江电力', '中国神华', '宁德时代', '比亚迪',
+                       '恒瑞医药', '迈瑞医疗', '海天味业', '伊利股份', '中国移动',
+                       '工商银行', '建设银行', '农业银行', '中国银行']
+    if any(bc in name for bc in blue_chip_names):
+        quality_score += 5
+        quality_note = "知名蓝筹"
+    elif mcap_yi > 500:
+        quality_score += 3
+        quality_note = "大市值优质"
+    elif 100 <= mcap_yi <= 500:
+        quality_score += 1
+        quality_note = "中等市值"
+    else:
+        quality_note = "小市值"
+    
+    score += quality_score
+    breakdown['quality'] = {'score': quality_score, 'note': quality_note}
+    
+    return {
+        'total_score': min(100, score),
+        'breakdown': breakdown,
+        'recommendation': (
+            '强烈推荐' if score >= 80 else
+            '推荐' if score >= 65 else
+            '中性' if score >= 50 else
+            '谨慎' if score >= 35 else
+            '不推荐'
+        ),
+    }
+
+
+def find_price_similar(code):
+    """
+    Find stocks with similar price range (±30%).
+    Uses static stock pool + batch quotes + lightweight scoring.
+    Zero risk of rate limiting — single batch quote call.
+    """
+    cache_key = f"ps_{code}"
+    cached_val = cached(cache_key, ttl=600)
+    if cached_val:
+        return cached_val
+    
+    try:
+        # Get primary stock price
+        info = get_stock_info(code)
+        price = info.get('最新价', 0)
+        if not price:
+            return []
+        
+        symbol = code.replace('.SZ', '').replace('.SH', '').replace('.BJ', '')
+        lo = price * 0.7
+        hi = price * 1.3
+        
+        # Get all candidates from static pool
+        all_candidates = _get_all_candidate_codes()
+        # Exclude primary stock
+        all_candidates = [x for x in all_candidates if x[0] != symbol]
+        
+        if not all_candidates:
+            return []
+        
+        # Batch get quotes (Tencent + Sina fallback)
+        wc_codes = [x[2] for x in all_candidates]
+        quotes = _batch_get_quotes(wc_codes)
+        
+        # Filter and score
+        candidates = []
+        for c, n, wc in all_candidates:
+            q = quotes.get(wc, {})
+            p = q.get('price', 0) or 0
+            if lo <= p <= hi:
+                cand = {
+                    'code': c,
+                    'name': n,
+                    'wc': wc,
+                    'price': p,
+                    'pe': q.get('pe', 0) or 0,
+                    'pb': q.get('pb', 0) or 0,
+                    'change': q.get('change_pct', 0) or 0,
+                    'market_cap': q.get('mcap', 0) or 0,
+                }
+                score_result = _lightweight_score(cand)
+                cand['total_score'] = score_result['total_score']
+                cand['recommendation'] = score_result['recommendation']
+                cand['scores_breakdown'] = score_result['breakdown']
+                cand['code_full'] = c + ('.SH' if wc.startswith('sh') else '.SZ')
+                candidates.append(cand)
+        
+        # Sort by score, take top 4
+        candidates.sort(key=lambda x: x['total_score'], reverse=True)
+        result = candidates[:4]
+        
+        print(f"[find_price_similar] Price range ¥{lo:.2f}-{hi:.2f}, found {len(candidates)} total, returning {len(result)}")
+        cache_set(cache_key, result)
+        return result
+        
+    except Exception as e:
+        print(f"[find_price_similar] Error: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
+
+
+def find_recommended(code):
+    """
+    Find comprehensive recommended stocks across all industries.
+    Uses static stock pool + batch quotes + lightweight scoring.
+    Excludes stocks from the same industry to avoid overlap with industry tab.
+    """
+    cache_key = f"rc_{code}"
+    cached_val = cached(cache_key, ttl=600)
+    if cached_val:
+        return cached_val
+    
+    try:
+        symbol = code.replace('.SZ', '').replace('.SH', '').replace('.BJ', '')
+        
+        # Try to get industry peers (for exclusion)
+        try:
+            ind_data = get_industry_data(code)
+            peer_codes = _get_industry_peers_by_board(code)
+            same_ind_codes = set(p['code'] for p in peer_codes) if peer_codes else set()
+            # Try static peers too
+            static_peers = api_fallback.static_get_industry_peers(
+                code,
+                ind_data.get('industry_name', ''),
+                ind_data.get('board_name', '')
+            )
+            if static_peers:
+                same_ind_codes.update(p['code'] for p in static_peers)
+        except:
+            same_ind_codes = set()
+        same_ind_codes.add(symbol)
+        
+        # Get all candidates from static pool
+        all_candidates = _get_all_candidate_codes()
+        all_candidates = [x for x in all_candidates if x[0] not in same_ind_codes]
+        
+        if not all_candidates:
+            return []
+        
+        # Batch get quotes
+        wc_codes = [x[2] for x in all_candidates]
+        quotes = _batch_get_quotes(wc_codes)
+        
+        # Score all candidates
+        candidates = []
+        for c, n, wc in all_candidates:
+            q = quotes.get(wc, {})
+            p = q.get('price', 0) or 0
+            if p <= 0:
+                continue
+            cand = {
+                'code': c,
+                'name': n,
+                'wc': wc,
+                'price': p,
+                'pe': q.get('pe', 0) or 0,
+                'pb': q.get('pb', 0) or 0,
+                'change': q.get('change_pct', 0) or 0,
+                'market_cap': q.get('mcap', 0) or 0,
+            }
+            score_result = _lightweight_score(cand)
+            cand['total_score'] = score_result['total_score']
+            cand['recommendation'] = score_result['recommendation']
+            cand['scores_breakdown'] = score_result['breakdown']
+            cand['code_full'] = c + ('.SH' if wc.startswith('sh') else '.SZ')
+            candidates.append(cand)
+        
+        # Sort by score, take top 4
+        candidates.sort(key=lambda x: x['total_score'], reverse=True)
+        result = candidates[:4]
+        
+        print(f"[find_recommended] Scored {len(candidates)} candidates, returning {len(result)}")
+        cache_set(cache_key, result)
+        return result
+        
+    except Exception as e:
+        print(f"[find_recommended] Error: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
+
 @app.route("/api/config", methods=["GET", "POST"])
 def api_config():
     if request.method == "GET":
@@ -1771,6 +2089,42 @@ def alternatives():
     return jsonify({
         "alternatives": alts,
         "_meta": {"fb": api_fallback.get_fallback_log()[-10:]}
+    })
+
+
+@app.route("/api/alternatives/all", methods=["POST"])
+def alternatives_all():
+    """Return all 3 alternative modes in a single response.
+    Avoids rate limits by using one batch quote call for all modes."""
+    data = request.json
+    code = data.get("code", "").strip()
+    if not code:
+        return jsonify({"error": "请输入股票代码"}), 400
+
+    try:
+        # Run all three modes
+        industry = find_alternatives(code)
+    except Exception as e:
+        print(f"[alternatives_all] industry error: {e}")
+        industry = []
+
+    try:
+        price_similar = find_price_similar(code)
+    except Exception as e:
+        print(f"[alternatives_all] price_similar error: {e}")
+        price_similar = []
+
+    try:
+        recommended = find_recommended(code)
+    except Exception as e:
+        print(f"[alternatives_all] recommended error: {e}")
+        recommended = []
+
+    return jsonify({
+        "industry": industry,
+        "price_similar": price_similar,
+        "recommended": recommended,
+        "_meta": {"fb": api_fallback.get_fallback_log()[-15:]}
     })
 
 

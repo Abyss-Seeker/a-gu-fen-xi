@@ -167,6 +167,7 @@
             <h1 class="stock-title-name">${name}</h1>
             <div class="stock-title-code">${r.code || code}</div>
             ${boardLabel ? `<div class="stock-title-board">${boardLabel}</div>` : ''}
+            <div class="stock-title-time">📅 分析时间：${r.report_time || ''}</div>
           </div>
           <div class="stock-title-right">
             <div class="stock-title-price">¥ ${price.toFixed(2)}</div>
@@ -268,10 +269,27 @@
         </div>
       </div>
 
+      <!-- K-line Chart -->
+      <div class="report-section">
         <div class="section-header" onclick="this.nextElementSibling.classList.toggle('collapsed')">
-          <h3>📋 一、基本面体检 <span class="score-badge danger">${(scores.fundamental||{}).score||0}/${(scores.fundamental||{}).max||25}</span></h3>
-          <button class="btn-deep-analyze" onclick="event.stopPropagation();handleDeepAnalyze('fundamental')" title="AI 深度分析 + 多空辩论">🔬 深度分析</button>
+          <h3>🕯️ K线走势图</h3>
+          <span style="font-size:0.75rem;color:var(--text-secondary)">拖拽滑块调整时间范围 · 7条均线</span>
         </div>
+        <div class="section-body">
+          <div id="klineChart" style="width:100%;height:420px"></div>
+          <div class="kline-ma-legend">
+            <span class="ma-dot ma5">MA5</span>
+            <span class="ma-dot ma10">MA10</span>
+            <span class="ma-dot ma20">MA20</span>
+            <span class="ma-dot ma30">MA30</span>
+            <span class="ma-dot ma60">MA60</span>
+            <span class="ma-dot ma120">MA120</span>
+            <span class="ma-dot ma250">MA250</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Section 1: Fundamental -->
         <div class="section-body">
           ${buildFundamentalSection(r)}
           <div class="deep-analyze-panel" id="deep-fundamental" style="display:none"></div>
@@ -368,7 +386,12 @@
           <h3>🔄 替代标的推荐</h3>
         </div>
         <div class="section-body">
-          <div id="altContent"><p style="color:var(--text-secondary)">正在加载同价位替代标的...</p></div>
+          <div class="alt-tabs">
+            <button class="alt-tab active" data-alt-mode="industry">🏭 同板块</button>
+            <button class="alt-tab" data-alt-mode="price">💰 相似股价</button>
+            <button class="alt-tab" data-alt-mode="recommended">⭐ 综合推荐</button>
+          </div>
+          <div id="altContent"><p style="color:var(--text-secondary)">正在加载替代标的...</p></div>
         </div>
       </div>
 
@@ -380,6 +403,9 @@
 
     // Render history bar after content is in DOM
     setTimeout(renderHistoryBar, 50);
+
+    // Render K-line chart
+    setTimeout(function() { renderKlineChart(r); }, 100);
 
     // Debug: show scoring breakdown for all dimensions
     if (isDebug()) {
@@ -694,9 +720,229 @@
     `;
   }
 
+
+  // ========== K-line Chart ==========
+  /**
+   * Calculate moving average from price data.
+   */
+  function _calcMA(data, period) {
+    var result = [];
+    for (var i = 0; i < data.length; i++) {
+      if (i < period - 1) {
+        result.push('-');
+        continue;
+      }
+      var sum = 0;
+      for (var j = 0; j < period; j++) {
+        sum += data[i - j][1]; // data[i] = [date, close]
+      }
+      result.push((sum / period).toFixed(2));
+    }
+    return result;
+  }
+
+  /**
+   * Render interactive K-line chart with ECharts.
+   * Supports candlestick, MA lines (5/10/20/30/60/120/250), and dataZoom slider.
+   */
+  function renderKlineChart(report) {
+    var chartDom = document.getElementById('klineChart');
+    if (!chartDom) return;
+    if (typeof echarts === 'undefined') {
+      chartDom.innerHTML = '<p style="color:#999;text-align:center;padding:40px">ECharts 加载中...</p>';
+      return;
+    }
+
+    var prices = report.prices_data || [];
+    if (prices.length < 10) {
+      chartDom.innerHTML = '<p style="color:#999;text-align:center;padding:40px">K线数据不足</p>';
+      return;
+    }
+
+    // Ensure chart instance is disposed before creating new one
+    var existingInstance = echarts.getInstanceByDom(chartDom);
+    if (existingInstance) existingInstance.dispose();
+
+    var chart = echarts.init(chartDom);
+
+    // Prepare data arrays
+    var dates = [];
+    var ohlc = [];
+    var volumes = [];
+    var closePrices = [];
+
+    for (var i = 0; i < prices.length; i++) {
+      var d = prices[i];
+      dates.push(d['日期'] || '');
+      ohlc.push([
+        parseFloat(d['开盘']) || 0,
+        parseFloat(d['收盘']) || 0,
+        parseFloat(d['最低']) || 0,
+        parseFloat(d['最高']) || 0
+      ]);
+      volumes.push([i, parseFloat(d['成交量']) || 0, (parseFloat(d['收盘']) >= parseFloat(d['开盘'])) ? 1 : -1]);
+      closePrices.push([dates[i], parseFloat(d['收盘']) || 0]);
+    }
+
+    // Calculate MAs
+    var maPeriods = [5, 10, 20, 30, 60, 120, 250];
+    var maColors = ['#ff6b6b', '#ffa502', '#7bed9f', '#70a1ff', '#a29bfe', '#fd79a8', '#00b894'];
+    var maSeries = [];
+    for (var m = 0; m < maPeriods.length; m++) {
+      var p = maPeriods[m];
+      var maData = _calcMA(closePrices, p);
+      // Convert to [date, value] for category axis
+      var mappedData = [];
+      for (var i2 = 0; i2 < dates.length; i2++) {
+        mappedData.push(maData[i2] === '-' ? '-' : parseFloat(maData[i2]));
+      }
+      maSeries.push({
+        name: 'MA' + p,
+        type: 'line',
+        data: mappedData,
+        smooth: true,
+        lineStyle: { width: 1, color: maColors[m], opacity: 0.7 },
+        itemStyle: { color: maColors[m] },
+        symbol: 'none',
+        connectNulls: false,
+      });
+    }
+
+    // Build option
+    var option = {
+      animation: false,
+      backgroundColor: '#fff',
+      tooltip: {
+        trigger: 'axis',
+        axisPointer: { type: 'cross' },
+        formatter: function(params) {
+          if (!params || params.length === 0) return '';
+          var idx = params[0].dataIndex;
+          var html = '<div style="font-size:13px"><b>' + dates[idx] + '</b><br/>';
+          for (var k = 0; k < params.length; k++) {
+            var p = params[k];
+            if (p.seriesName === 'Volume') continue;
+            var color = p.color || '#333';
+            var val = p.value;
+            if (typeof val === 'object' && val.length >= 4) {
+              html += '<span style="color:' + color + '">● ' + p.seriesName + '</span> 开:' + val[0].toFixed(2) + ' 收:' + val[1].toFixed(2) + ' 低:' + val[2].toFixed(2) + ' 高:' + val[3].toFixed(2) + '<br/>';
+            } else if (typeof val === 'number') {
+              html += '<span style="color:' + color + '">● ' + p.seriesName + '</span> ' + val.toFixed(2) + '<br/>';
+            }
+          }
+          html += '</div>';
+          return html;
+        }
+      },
+      axisPointer: {
+        link: [{ xAxisIndex: [0, 1] }]
+      },
+      grid: [
+        { left: '8%', right: '3%', top: 10, height: '60%' },
+        { left: '8%', right: '3%', top: '75%', height: '15%' }
+      ],
+      xAxis: [
+        {
+          type: 'category',
+          data: dates,
+          scale: true,
+          boundaryGap: true,
+          axisLine: { onZero: false },
+          splitLine: { show: false },
+          min: 'dataMin',
+          max: 'dataMax',
+          axisLabel: { show: false },
+          axisPointer: { label: { show: false } }
+        },
+        {
+          type: 'category',
+          gridIndex: 1,
+          data: dates,
+          scale: true,
+          boundaryGap: true,
+          axisLine: { onZero: false },
+          axisTick: { show: false },
+          splitLine: { show: false },
+          axisLabel: { show: false },
+          min: 'dataMin',
+          max: 'dataMax'
+        }
+      ],
+      yAxis: [
+        {
+          scale: true,
+          splitArea: { show: true },
+          splitLine: { lineStyle: { color: '#f0f0f0' } },
+          axisLabel: { fontSize: 10 }
+        },
+        {
+          scale: true,
+          gridIndex: 1,
+          splitNumber: 2,
+          axisLabel: { show: false },
+          axisLine: { show: false },
+          axisTick: { show: false },
+          splitLine: { show: false }
+        }
+      ],
+      dataZoom: [
+        {
+          type: 'inside',
+          xAxisIndex: [0, 1],
+          start: Math.max(0, 100 - (150 / prices.length) * 100),
+          end: 100
+        },
+        {
+          show: true,
+          xAxisIndex: [0, 1],
+          type: 'slider',
+          bottom: 5,
+          start: Math.max(0, 100 - (150 / prices.length) * 100),
+          end: 100,
+          height: 25,
+          borderColor: '#e0e0e0',
+          fillerColor: 'rgba(59,130,246,0.1)',
+          handleStyle: { color: '#3b82f6' },
+          textStyle: { fontSize: 10 }
+        }
+      ],
+      series: [
+        {
+          name: 'K线',
+          type: 'candlestick',
+          data: ohlc,
+          itemStyle: {
+            color: '#ef4444',        // up = red (Chinese convention)
+            color0: '#22c55e',       // down = green
+            borderColor: '#ef4444',
+            borderColor0: '#22c55e'
+          }
+        },
+        {
+          name: 'Volume',
+          type: 'bar',
+          xAxisIndex: 1,
+          yAxisIndex: 1,
+          data: volumes.map(function(v) {
+            return { value: v[1], itemStyle: { color: v[2] === 1 ? '#ef4444' : '#22c55e', opacity: 0.4 } };
+          })
+        }
+      ].concat(maSeries)
+    };
+
+    chart.setOption(option);
+
+    // Handle window resize
+    window.addEventListener('resize', function() {
+      if (chart && !chart.isDisposed()) chart.resize();
+    });
+  }
+
   // ========== Alternatives ==========
   // Store alternatives data globally for deep analysis
   let _altDataCache = [];
+  let _altCache = { industry: [], price_similar: [], recommended: [], _loaded: false };
+  let _altActiveMode = 'industry';
 
   /**
    * Log API fallback info to browser console with color coding.
@@ -745,79 +991,157 @@
     console.groupEnd();
   }
 
-  async function loadAlternatives(code) {
+  // ========== Alternatives: 3-Mode System ==========
+
+  /**
+   * Load all 3 alternative modes in a single API call.
+   * Caches all results and renders the active mode.
+   */
+  async function loadAllAlternatives(code) {
+    var container = $('#altContent');
+    if (!container) return;
+
+    // Reset tab to industry
+    _altActiveMode = 'industry';
+    updateAltTabUI();
+
     try {
-      const resp = await fetch('/api/alternatives', {
+      var resp = await fetch('/api/alternatives/all', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ code }),
       });
-      const data = await resp.json();
-      const alts = data.alternatives || [];
-      _altDataCache = alts;
-      _logFallbackInfo('替代标的', data, resp);
-      const container = $('#altContent');
-      if (!container) return;
+      var data = await resp.json();
 
-      if (alts.length === 0) {
-        container.innerHTML = '<p style="color:var(--text-secondary)">未找到同行业替代标的（可能是行业数据获取失败或该行业样本不足）</p>';
-        return;
-      }
+      _altCache.industry = data.industry || [];
+      _altCache.price_similar = data.price_similar || [];
+      _altCache.recommended = data.recommended || [];
+      _altCache._loaded = true;
 
-      container.innerHTML = `
-        <div class="alt-grid">
-          ${alts.map((a, i) => {
-            const fullCode = a.code_full || (a.code.startsWith('6') ? a.code + '.SH' : a.code + '.SZ');
-            const realScore = a.total_score || 0;
-            const scoreCls = realScore >= 60 ? 'good' : realScore >= 40 ? 'mid' : 'low';
-            const recd = a.recommendation || '';
-            return `
-            <div class="alt-card-wrap">
-              <div class="alt-card" onclick="document.getElementById('searchCode').value='${fullCode}';document.getElementById('searchBtn').click()" style="cursor:pointer">
-                <div class="alt-name">
-                  <span class="alt-rank">#${i+1}</span> ${a.name}
-                </div>
-                <div class="alt-code">${fullCode}</div>
-                <div class="alt-stats">
-                  <div class="alt-stat">
-                    <div class="alt-stat-label">价格</div>
-                    <span>¥${(a.price||0).toFixed(2)}</span>
-                  </div>
-                  <div class="alt-stat">
-                    <div class="alt-stat-label">PE</div>
-                    <span>${(a.pe||0) > 0 ? (a.pe||0).toFixed(1) : '亏损'}</span>
-                  </div>
-                  <div class="alt-stat">
-                    <div class="alt-stat-label">PB</div>
-                    <span>${((a.pb||0)).toFixed(2)}</span>
-                  </div>
-                  <div class="alt-stat">
-                    <div class="alt-stat-label">涨跌</div>
-                    <span class="${(a.change||0) >= 0 ? 'trend-up' : 'trend-down'}">${(a.change||0) > 0 ? '+' : ''}${(a.change||0).toFixed(2)}%</span>
-                  </div>
-                </div>
-                ${a.market_cap ? `<div class="alt-mcap">市值 ${(a.market_cap / 1e8).toFixed(0)}亿</div>` : ''}
-                ${realScore > 0 ? `<div class="alt-score-bar"><div class="alt-score-label">综合评分 ${recd ? '· ' + recd : ''}</div><div class="alt-score-value ${scoreCls}">${realScore}分</div></div>` : `<div class="alt-score-bar"><div class="alt-score-label" style="color:#999">评分计算中...</div></div>`}
-              </div>
-              <button class="btn-alt-deep" onclick="event.stopPropagation();toggleAltDeepAnalysis(${i})" title="展开对比分析">
-                📊 深度对比
-                <span class="alt-deep-arrow" id="altDeepArrow${i}">▾</span>
-              </button>
-              <div class="alt-deep-panel" id="altDeepPanel${i}" style="display:none"></div>
-            </div>
-            `;
-          }).join('')}
-        </div>
-        <p style="font-size:0.75rem;color:var(--text-secondary);margin-top:8px">
-          📌 同行业低PE标的（来自申万行业分类）| 点击卡片可切换分析该股票 | 点击「深度对比」查看多维度辩论分析
-        </p>
-      `;
+      _logFallbackInfo('替代标的(全部)', data, resp);
+
+      // Render active mode
+      renderAltContent();
     } catch (err) {
-      console.error('Alternatives error:', err);
-      const container = $('#altContent');
-      if (container) container.innerHTML = '<p style="color:var(--text-secondary)">替代标的数据加载失败</p>';
+      console.error('[Alt] Load all error:', err);
+      if (container) container.innerHTML = '<p style="color:var(--text-secondary)">替代标的数据加载失败，请刷新重试</p>';
     }
   }
+
+  // Backward compat: old loadAlternatives still called by analyzeStock
+  async function loadAlternatives(code) {
+    return loadAllAlternatives(code);
+  }
+
+  /**
+   * Switch active alternatives tab.
+   */
+  function switchAltTab(mode) {
+    if (!_altCache._loaded) return;
+    _altActiveMode = mode;
+    updateAltTabUI();
+    renderAltContent();
+  }
+
+  /**
+   * Update tab button active states.
+   */
+  function updateAltTabUI() {
+    var tabs = document.querySelectorAll('.alt-tab');
+    for (var i = 0; i < tabs.length; i++) {
+      var t = tabs[i];
+      var mode = t.getAttribute('data-alt-mode');
+      if (mode === _altActiveMode) {
+        t.classList.add('active');
+      } else {
+        t.classList.remove('active');
+      }
+    }
+  }
+
+  /**
+   * Render alternatives for the current active mode.
+   */
+  function renderAltContent() {
+    var container = $('#altContent');
+    if (!container) return;
+
+    var alts = _altCache[_altActiveMode] || [];
+    var modeLabels = {
+      industry: '🏭 同板块低PE标的（来自申万行业分类）',
+      price_similar: '💰 相似价格区间标的（±30%）',
+      recommended: '⭐ 综合推荐标的（跨行业优质筛选）',
+    };
+    var emptyLabels = {
+      industry: '未找到同行业替代标的',
+      price_similar: '未找到同价位优质标的（可能是该价格区间暂无合适标的）',
+      recommended: '暂无综合推荐标的',
+    };
+
+    if (alts.length === 0) {
+      container.innerHTML = '<p style="color:var(--text-secondary)">' + (emptyLabels[_altActiveMode] || '暂无数据') + '</p>';
+      return;
+    }
+
+    // Build cards
+    var cardsHtml = '';
+    for (var i = 0; i < alts.length; i++) {
+      var a = alts[i];
+      var fullCode = a.code_full || (a.code && a.code.startsWith('6') ? a.code + '.SH' : a.code + '.SZ');
+      var realScore = a.total_score || 0;
+      var scoreCls = realScore >= 60 ? 'good' : realScore >= 40 ? 'mid' : 'low';
+      var recd = a.recommendation || '';
+      var mcapDisplay = '';
+      if (a.market_cap) {
+        mcapDisplay = '<div class="alt-mcap">市值 ' + (a.market_cap / 1e8).toFixed(0) + '亿</div>';
+      }
+
+      cardsHtml += '<div class="alt-card-wrap">' +
+        '<div class="alt-card" data-alt-fullcode="' + fullCode + '" style="cursor:pointer">' +
+          '<div class="alt-name"><span class="alt-rank">#' + (i+1) + '</span> ' + (a.name || '') + '</div>' +
+          '<div class="alt-code">' + fullCode + '</div>' +
+          '<div class="alt-stats">' +
+            '<div class="alt-stat"><div class="alt-stat-label">价格</div><span>¥' + ((a.price||0)).toFixed(2) + '</span></div>' +
+            '<div class="alt-stat"><div class="alt-stat-label">PE</div><span>' + ((a.pe||0) > 0 ? (a.pe||0).toFixed(1) : '亏损') + '</span></div>' +
+            '<div class="alt-stat"><div class="alt-stat-label">PB</div><span>' + ((a.pb||0)).toFixed(2) + '</span></div>' +
+            '<div class="alt-stat"><div class="alt-stat-label">涨跌</div><span class="' + ((a.change||0) >= 0 ? 'trend-up' : 'trend-down') + '">' + ((a.change||0) > 0 ? '+' : '') + (a.change||0).toFixed(2) + '%</span></div>' +
+          '</div>' +
+          mcapDisplay +
+          (realScore > 0
+            ? '<div class="alt-score-bar"><div class="alt-score-label">综合评分 ' + (recd ? '· ' + recd : '') + '</div><div class="alt-score-value ' + scoreCls + '">' + realScore + '分</div></div>'
+            : '<div class="alt-score-bar"><div class="alt-score-label" style="color:#999">评分计算中...</div></div>') +
+        '</div></div>';
+    }
+
+    container.innerHTML = '<div class="alt-grid">' + cardsHtml + '</div>' +
+      '<p style="font-size:0.75rem;color:var(--text-secondary);margin-top:8px">' +
+        (modeLabels[_altActiveMode] || '') + ' | 点击卡片可切换分析该股票' +
+      '</p>';
+
+    // Update data cache for deep analysis compatibility
+    _altDataCache = alts;
+  }
+
+  // ---- Event delegation: alt-tab clicks ----
+  document.addEventListener('click', function(e) {
+    var tab = e.target.closest('.alt-tab');
+    if (tab) {
+      var mode = tab.getAttribute('data-alt-mode');
+      if (mode) switchAltTab(mode);
+      return;
+    }
+    // Alt card click: switch to that stock
+    var card = e.target.closest('.alt-card');
+    if (card) {
+      var fc = card.getAttribute('data-alt-fullcode');
+      if (fc) {
+        var searchInput = document.getElementById('searchCode');
+        var searchBtn = document.getElementById('searchBtn');
+        if (searchInput) searchInput.value = fc;
+        if (searchBtn) searchBtn.click();
+      }
+    }
+  });
 
   // ========== Alternative Deep Analysis ==========
   function toggleAltDeepAnalysis(index) {

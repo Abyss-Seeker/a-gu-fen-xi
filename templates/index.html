@@ -21,6 +21,25 @@
     .tag-sh { background: #e17055; color: #fff; }
     .tag-sz { background: #0984e3; color: #fff; }
     .tag-bj { background: #6c5ce7; color: #fff; }
+
+    /* Search autocomplete dropdown */
+    .search-wrapper { position: relative; flex: 1; }
+    .search-dropdown {
+      position: absolute; top: 100%; left: 0; right: 0;
+      background: #fff; border: 1px solid var(--border);
+      border-radius: 0 0 var(--radius) var(--radius);
+      box-shadow: 0 8px 24px rgba(0,0,0,0.12);
+      z-index: 10001; max-height: 280px; overflow-y: auto;
+    }
+    .search-dropdown-item {
+      display: flex; align-items: center; gap: 8px;
+      padding: 10px 14px; cursor: pointer; font-size: 0.85rem;
+      border-bottom: 1px solid #f0f0f0; transition: background 0.15s;
+    }
+    .search-dropdown-item:last-child { border-bottom: none; }
+    .search-dropdown-item:hover, .search-dropdown-item.active { background: #e8f4fd; }
+    .search-item-name { font-weight: 600; color: #1a1a2e; flex: 1; }
+    .search-item-code { font-size: 0.75rem; color: #94a3b8; font-family: monospace; }
   </style>
 </head>
 <body>
@@ -36,9 +55,12 @@
   <div class="container">
     <!-- Search -->
     <div class="search-section">
-      <input type="text" id="searchCode" class="search-input"
-             placeholder="输入股票代码，如 000607.SZ 或 600968.SH，按 Enter 搜索"
-             autocomplete="off">
+      <div class="search-wrapper">
+        <input type="text" id="searchCode" class="search-input"
+               placeholder="输入股票代码或名称，如 000607、茅台、600519.SH，按 Enter 搜索"
+               autocomplete="off">
+        <div class="search-dropdown" id="searchDropdown" style="display:none"></div>
+      </div>
       <button class="btn btn-primary" id="searchBtn">🔍 开始分析</button>
       <div style="width:100%;margin-top:-4px">
         <div class="search-hint">支持格式：000607.SZ / 600968.SH / 纯数字代码</div>

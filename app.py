@@ -3413,6 +3413,169 @@ def deep_cache_clear():
         return jsonify({"status": "ok", "cleared": "all"})
 
 
+# ---------- Stock Search / Autocomplete ----------
+
+# Global stock list cache with TTL
+_STOCK_LIST_CACHE = None
+_STOCK_LIST_CACHE_TIME = 0
+
+def _build_pinyin_initials(name):
+    """Extract pinyin initials for Chinese stock names using a minimal mapping.
+    Returns lowercase string of initials (e.g., '贵州茅台' → 'gzmt')."""
+    # Common first-character pinyin mapping for Chinese stock name characters
+    _PINYIN_MAP = {
+        '安': 'a', '白': 'b', '宝': 'b', '北': 'b', '本': 'b', '比': 'b', '博': 'b',
+        '长': 'c', '成': 'c', '城': 'c', '创': 'c', '川': 'c', '传': 'c', '船': 'c',
+        '大': 'd', '电': 'd', '东': 'd', '地': 'd', '达': 'd', '迪': 'd', '德': 'd',
+        '鄂': 'e', '恩': 'e',
+        '方': 'f', '风': 'f', '福': 'f', '富': 'f', '飞': 'f', '复': 'f',
+        '工': 'g', '国': 'g', '广': 'g', '高': 'g', '格': 'g', '贵': 'g', '公': 'g',
+        '海': 'h', '华': 'h', '恒': 'h', '航': 'h', '合': 'h', '河': 'h', '化': 'h', '惠': 'h',
+        '机': 'j', '建': 'j', '金': 'j', '交': 'j', '家': 'j', '京': 'j', '酒': 'j', '军': 'j',
+        '科': 'k', '康': 'k', '凯': 'k',
+        '联': 'l', '老': 'l', '龙': 'l', '利': 'l', '林': 'l', '泸': 'l', '路': 'l', '绿': 'l',
+        '美': 'm', '民': 'm', '明': 'm', '牡': 'm',
+        '宁': 'n', '南': 'n', '能': 'n', '农': 'n',
+        '平': 'p', '浦': 'p', '普': 'p',
+        '汽': 'q', '青': 'q', '全': 'q',
+        '人': 'r', '日': 'r', '瑞': 'r',
+        '上': 's', '深': 's', '石': 's', '世': 's', '三': 's', '生': 's', '数': 's', '水': 's',
+        '天': 't', '通': 't', '太': 't', '台': 't', '泰': 't',
+        '万': 'w', '五': 'w', '物': 'w', '芜': 'w', '网': 'w', '潍': 'w',
+        '新': 'x', '西': 'x', '兴': 'x', '信': 'x', '星': 'x', '小': 'x', '厦': 'x', '协': 'x',
+        '一': 'y', '银': 'y', '洋': 'y', '医': 'y', '云': 'y', '运': 'y', '有': 'y', '药': 'y', '易': 'y',
+        '中': 'z', '招': 'z', '重': 'z', '证': 'z', '智': 'z', '紫': 'z', '正': 'z', '张': 'z',
+    }
+    result = []
+    for ch in name:
+        if ch in _PINYIN_MAP:
+            result.append(_PINYIN_MAP[ch])
+    return ''.join(result)
+
+
+def _get_stock_list():
+    """Fetch full A-share stock list with caching (1hr TTL).
+    Returns list of {code, name, code_full, pinyin} or empty list on failure."""
+    global _STOCK_LIST_CACHE, _STOCK_LIST_CACHE_TIME
+
+    now = time.time()
+    if _STOCK_LIST_CACHE and (now - _STOCK_LIST_CACHE_TIME) < 3600:
+        return _STOCK_LIST_CACHE
+
+    result = []
+
+    # Layer 1: EastMoney stock list API
+    try:
+        params = {
+            "pn": "1", "pz": "6000",
+            "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23",
+            "fields": "f12,f14",
+            "po": "1",
+        }
+        resp = _http_get(EM_DATACENTER.replace("/securities/api/data/v1/get", "/api/qt/clist/get"),
+                         params=params, timeout=15)
+        data = resp.json()
+        stocks_data = data.get("data", {}).get("diff", [])
+        if stocks_data:
+            for s in stocks_data:
+                code = s.get("f12", "")
+                name = s.get("f14", "")
+                if code and name:
+                    suffix = ".SH" if code.startswith("6") else (".BJ" if code.startswith("8") else ".SZ")
+                    result.append({
+                        "code": code,
+                        "name": name,
+                        "code_full": code + suffix,
+                        "pinyin": _build_pinyin_initials(name),
+                    })
+            print(f"[stock_list] EastMoney: {len(result)} stocks")
+    except Exception as e:
+        print(f"[stock_list] EastMoney failed: {e}")
+
+    # Layer 2: Fallback — use STATIC_PEERS from api_fallback
+    if not result:
+        print("[stock_list] Using static fallback")
+        seen = set()
+        for cat, stocks in api_fallback.STATIC_PEERS.items():
+            for c, n, wc in stocks:
+                if c not in seen:
+                    seen.add(c)
+                    suffix = ".SH" if c.startswith("6") else ".SZ"
+                    result.append({
+                        "code": c,
+                        "name": n,
+                        "code_full": c + suffix,
+                        "pinyin": _build_pinyin_initials(n),
+                    })
+        print(f"[stock_list] Static fallback: {len(result)} stocks")
+
+    _STOCK_LIST_CACHE = result
+    _STOCK_LIST_CACHE_TIME = now
+    return result
+
+
+@app.route("/api/search")
+def search_stocks():
+    """Fuzzy search A-share stocks. Returns up to 6 matches."""
+    q = request.args.get("q", "").strip()
+    if not q or len(q) < 1:
+        return jsonify({"results": []})
+
+    stock_list = _get_stock_list()
+    q_lower = q.lower()
+
+    # Score each stock: exact code match > code prefix > name match > pinyin match
+    scored = []
+    for s in stock_list:
+        score = 0
+        code = s["code"]
+        name = s["name"]
+        pin = s["pinyin"]
+
+        # Code exact match (highest priority)
+        if code == q_lower:
+            score = 1000
+        # Code prefix match
+        elif code.startswith(q_lower):
+            score = 800 + (10 - len(code))  # shorter codes get higher priority
+        # Code contains
+        elif q_lower in code:
+            score = 600
+
+        # Name exact match
+        if name == q:
+            score = max(score, 900)
+        # Name starts with query
+        elif name.startswith(q):
+            score = max(score, 700)
+        # Name contains
+        elif q_lower in name.lower():
+            score = max(score, 500)
+
+        # Pinyin match
+        if pin and q_lower in pin:
+            score = max(score, 400)
+
+        if score > 0:
+            scored.append((score, s))
+
+    # Sort by score desc, take top 6
+    scored.sort(key=lambda x: x[0], reverse=True)
+    results = [s for _, s in scored[:6]]
+
+    return jsonify({"results": results})
+
+
+@app.route("/api/search/refresh")
+def refresh_stock_list():
+    """Force refresh the stock list cache."""
+    global _STOCK_LIST_CACHE, _STOCK_LIST_CACHE_TIME
+    _STOCK_LIST_CACHE = None
+    _STOCK_LIST_CACHE_TIME = 0
+    new_list = _get_stock_list()
+    return jsonify({"status": "ok", "count": len(new_list)})
+
+
 # ---------- Health Check ----------
 
 @app.route("/api/health")

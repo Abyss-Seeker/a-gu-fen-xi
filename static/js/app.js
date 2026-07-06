@@ -106,8 +106,139 @@
     analyzeStock(code);
   });
   searchInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') analyzeStock(searchInput.value.trim());
+    if (e.key === 'Enter') {
+      var dropdown = document.getElementById('searchDropdown');
+      var selected = dropdown ? dropdown.querySelector('.search-dropdown-item.active') : null;
+      if (selected && dropdown.style.display !== 'none') {
+        // Use selected dropdown item
+        searchInput.value = selected.getAttribute('data-code-full') || '';
+        hideSearchDropdown();
+      }
+      analyzeStock(searchInput.value.trim());
+      return;
+    }
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      moveDropdownSelection(e.key === 'ArrowDown' ? 1 : -1);
+      return;
+    }
+    if (e.key === 'Escape') {
+      hideSearchDropdown();
+      return;
+    }
   });
+
+  // ========== Search Autocomplete ==========
+  var _searchTimer = null;
+  var _searchDropdownIdx = -1;
+
+  searchInput.addEventListener('input', function() {
+    var q = searchInput.value.trim();
+    if (q.length < 1) {
+      hideSearchDropdown();
+      return;
+    }
+    // Debounce: wait 150ms after last keystroke
+    clearTimeout(_searchTimer);
+    _searchTimer = setTimeout(function() {
+      fetchSearchSuggestions(q);
+    }, 150);
+  });
+
+  // Close dropdown when clicking outside
+  document.addEventListener('click', function(e) {
+    var wrapper = document.querySelector('.search-wrapper');
+    if (wrapper && !wrapper.contains(e.target)) {
+      hideSearchDropdown();
+    }
+  });
+
+  async function fetchSearchSuggestions(q) {
+    try {
+      var resp = await fetch('/api/search?q=' + encodeURIComponent(q));
+      var data = await resp.json();
+      var results = data.results || [];
+      renderSearchDropdown(results);
+    } catch (err) {
+      console.warn('[Search] Autocomplete error:', err.message);
+    }
+  }
+
+  function renderSearchDropdown(results) {
+    var dropdown = document.getElementById('searchDropdown');
+    if (!dropdown) return;
+    _searchDropdownIdx = -1;
+
+    if (results.length === 0) {
+      dropdown.style.display = 'none';
+      return;
+    }
+
+    var html = '';
+    for (var i = 0; i < results.length; i++) {
+      var r = results[i];
+      var tag = r.code_full && r.code_full.endsWith('.SH') ? 'tag-sh' : 'tag-sz';
+      var tagLabel = r.code_full && r.code_full.endsWith('.SH') ? 'SH' : 'SZ';
+      html += '<div class="search-dropdown-item" data-code-full="' + (r.code_full || '') +
+        '" data-idx="' + i + '">' +
+        '<span class="tag ' + tag + '">' + tagLabel + '</span>' +
+        '<span class="search-item-name">' + (r.name || '') + '</span>' +
+        '<span class="search-item-code">' + (r.code_full || r.code || '') + '</span>' +
+        '</div>';
+    }
+    dropdown.innerHTML = html;
+    dropdown.style.display = 'block';
+
+    // Click handler: select item and analyze
+    var items = dropdown.querySelectorAll('.search-dropdown-item');
+    items.forEach(function(item) {
+      item.addEventListener('click', function() {
+        searchInput.value = item.getAttribute('data-code-full') || '';
+        hideSearchDropdown();
+        analyzeStock(searchInput.value.trim());
+      });
+    });
+    // Hover: update active index
+    items.forEach(function(item) {
+      item.addEventListener('mouseenter', function() {
+        _searchDropdownIdx = parseInt(item.getAttribute('data-idx'));
+        updateDropdownHighlight();
+      });
+    });
+  }
+
+  function moveDropdownSelection(delta) {
+    var dropdown = document.getElementById('searchDropdown');
+    if (!dropdown || dropdown.style.display === 'none') return;
+    var items = dropdown.querySelectorAll('.search-dropdown-item');
+    if (items.length === 0) return;
+    _searchDropdownIdx = Math.max(0, Math.min(items.length - 1, _searchDropdownIdx + delta));
+    updateDropdownHighlight();
+    // Update input value to selected item
+    var active = items[_searchDropdownIdx];
+    if (active) {
+      searchInput.value = active.getAttribute('data-code-full') || '';
+    }
+  }
+
+  function updateDropdownHighlight() {
+    var dropdown = document.getElementById('searchDropdown');
+    if (!dropdown) return;
+    var items = dropdown.querySelectorAll('.search-dropdown-item');
+    items.forEach(function(item) {
+      item.classList.remove('active');
+    });
+    if (_searchDropdownIdx >= 0 && _searchDropdownIdx < items.length) {
+      items[_searchDropdownIdx].classList.add('active');
+      items[_searchDropdownIdx].scrollIntoView({ block: 'nearest' });
+    }
+  }
+
+  function hideSearchDropdown() {
+    var dropdown = document.getElementById('searchDropdown');
+    if (dropdown) dropdown.style.display = 'none';
+    _searchDropdownIdx = -1;
+  }
 
   // ========== Render Report ==========
   function getBoardEmoji(boardName) {

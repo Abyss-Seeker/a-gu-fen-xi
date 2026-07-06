@@ -384,6 +384,24 @@
       <div class="report-section" id="altSection">
         <div class="section-header" onclick="this.nextElementSibling.classList.toggle('collapsed')">
           <h3>🔄 替代标的推荐</h3>
+          <div class="alt-llm-toggle">
+            <label class="alt-llm-label">
+              <input type="checkbox" class="alt-llm-check" id="altNoLLMCheck">
+              <span>不使用LLM深度分析</span>
+            </label>
+            <span class="alt-llm-info" id="altLLMInfoBtn" title="了解更多">ⓘ</span>
+            <div class="alt-llm-popup" id="altLLMInfoPopup" style="display:none">
+              <div class="alt-llm-popup-inner">
+                <b>关于LLM深度分析</b><br><br>
+                勾选此选项后，点击「深度对比」将仅展示基于规则的维度对比分析（PE、PB、ROE、PEG等），<b>不再调用AI大模型</b>进行辩论式分析和综合评价。<br><br>
+                适用场景：<br>
+                · 网络不稳定或LLM API不可用时<br>
+                · 希望快速查看规则化数据对比<br>
+                · 节省API调用额度<br><br>
+                取消勾选即可恢复完整AI分析。
+              </div>
+            </div>
+          </div>
         </div>
         <div class="section-body">
           <div class="alt-tabs">
@@ -1078,6 +1096,7 @@
   // Score source tracking for display
   let _altFullScores = {};  // code_full -> {total_score, recommendation, scores_breakdown, source}
   let _altScoreLoadState = 'idle';  // 'idle' | 'loading' | 'done'
+  let _altNoLLM = false;  // skip LLM deep analysis when true
 
   /**
    * Progressive loading: base preview → full scoring
@@ -1529,6 +1548,23 @@
       var idx = parseInt(deepBtn.getAttribute('data-alt-deep'));
       if (!isNaN(idx)) toggleAltDeepAnalysis(idx);
     }
+    // LLM toggle checkbox
+    if (e.target.id === 'altNoLLMCheck') {
+      e.stopPropagation();
+      _altNoLLM = e.target.checked;
+      console.log('%c[Alt] LLM深度分析: ' + (_altNoLLM ? '已禁用 (仅规则对比)' : '已启用'), 'color:#3b82f6');
+    }
+    // LLM info icon
+    if (e.target.closest('#altLLMInfoBtn')) {
+      e.stopPropagation();
+      var popup = document.getElementById('altLLMInfoPopup');
+      if (popup) popup.style.display = popup.style.display === 'none' ? 'block' : 'none';
+    }
+    // Close info popup when clicking outside
+    if (e.target.closest('#altLLMInfoPopup') === null && e.target.id !== 'altLLMInfoBtn' && !e.target.closest('#altLLMInfoBtn')) {
+      var p = document.getElementById('altLLMInfoPopup');
+      if (p && p.style.display === 'block') p.style.display = 'none';
+    }
   });
 
   // ========== Alternative Deep Analysis ==========
@@ -1577,8 +1613,20 @@
     _altDeepCache[cacheKey] = {
       html: html,
       sections: { score_analysis: '', financial_analysis: '', debate_analysis: '', verdict: '' },
-      completed: false
+      completed: _altNoLLM  // if LLM disabled, mark immediately as complete (no sections)
     };
+
+    // If LLM is disabled, show skip note and stop here
+    if (_altNoLLM) {
+      console.log('%c[Alt Deep] LLM已禁用，仅显示规则对比', 'color:#f59e0b');
+      var llmSecIds = { score_analysis: 'altAiScore_', financial_analysis: 'altAiFinance_',
+                        debate_analysis: 'altAiDebate_', verdict: 'altAiVerdict_' };
+      for (var sk in llmSecIds) {
+        var elm = document.getElementById(llmSecIds[sk] + index);
+        if (elm) elm.innerHTML = '<div class="alt-ai-content alt-ai-skipped">⏭️ LLM分析已跳过（用户设置）</div>';
+      }
+      return;
+    }
 
     // Start AI streaming comparison (updates cache.sections and DOM in parallel)
     fetchAltDeepCompareStream(index, alt, currentReport);
@@ -1589,31 +1637,25 @@
    */
   function _renderDeepCacheToPanel(panel, cacheEntry, index) {
     if (!cacheEntry) return;
-    var html = cacheEntry.html;
-    var sections = cacheEntry.sections || {};
 
-    // If we have LLM content, inject it into the HTML by replacing loading placeholders
+    // Step 1: Set rule-based HTML with placeholder divs
+    panel.innerHTML = cacheEntry.html;
+
+    // Step 2: Fill in LLM sections by direct DOM lookup — avoids regex issues with nested HTML
+    var sections = cacheEntry.sections || {};
     var secIds = { score_analysis: 'altAiScore_', financial_analysis: 'altAiFinance_',
                    debate_analysis: 'altAiDebate_', verdict: 'altAiVerdict_' };
     for (var sk in secIds) {
-      var elId = secIds[sk] + index;
+      var el = document.getElementById(secIds[sk] + index);
+      if (!el) continue;
       var content = sections[sk] || '';
-      var divHtml = '';
       if (content) {
-        divHtml = '<div class="alt-ai-content">' + renderSimpleMarkdown(content) + '</div>';
+        el.innerHTML = '<div class="alt-ai-content">' + renderSimpleMarkdown(content) + '</div>';
       } else if (cacheEntry.completed) {
-        divHtml = '<div class="alt-ai-content alt-ai-empty">（AI 未生成该部分内容）</div>';
-      } else {
-        divHtml = '<div class="alt-ai-loading"><span class="alt-ai-dot"></span> AI 正在生成辩论式分析...</div>';
+        el.innerHTML = '<div class="alt-ai-content alt-ai-empty">（AI 未生成该部分内容）</div>';
       }
-      // Replace the section placeholder
-      var pattern = new RegExp('<div[^>]*id="' + elId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '"[^>]*>.*?</div>', 's');
-      if (pattern.test(html)) {
-        html = html.replace(pattern, '<div id="' + elId + '">' + divHtml + '</div>');
-      }
+      // if not completed and no content yet, leave the original loading placeholder
     }
-
-    panel.innerHTML = html;
   }
 
   function buildAltDeepAnalysis(alt, cur) {

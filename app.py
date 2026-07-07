@@ -42,6 +42,7 @@ try:
     _HAS_PYPINYIN = True
 except ImportError:
     _HAS_PYPINYIN = False
+    print("[pinyin] pypinyin not installed, falling back to manual _PINYIN_FULL dictionary")
 
 # API fallback module
 import api_fallback
@@ -3668,7 +3669,8 @@ def _get_stock_list():
                 "code": code, "name": name, "code_full": code + suffix,
                 "pinyin": pinyin_info["initials"], "pinyin_full": pinyin_info["full"],
             })
-        print(f"[stock_list] Static embedded: {len(result)} stocks")
+        pinyin_source = "pypinyin" if _HAS_PYPINYIN else "manual"
+        print(f"[stock_list] Static embedded: {len(result)} stocks (pinyin: {pinyin_source})")
         _STOCK_LIST_CACHE = result
         _STOCK_LIST_CACHE_TIME = now
         return result

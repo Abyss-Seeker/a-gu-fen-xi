@@ -3,3 +3,4 @@ requests>=2.31
 numpy>=1.26
 pandas>=2.1
 openai>=1.12
+pypinyin>=0.50

@@ -1727,16 +1727,19 @@
     panel.style.display = 'block';
     if (arrow) arrow.textContent = '▴';
 
-    // Check cache first — but skip if it was a no-LLM skim (empty sections)
+    // Check cache first — skip if: no-LLM skim, error content, or empty sections
     var cachedEntry = _altDeepCache[cacheKey];
-    if (cachedEntry && !(cachedEntry.completed && !cachedEntry.sections.score_analysis && !cachedEntry.sections.financial_analysis)) {
+    var isSkim = cachedEntry && cachedEntry.completed && !cachedEntry.sections.score_analysis && !cachedEntry.sections.financial_analysis;
+    var hasError = cachedEntry && Object.values(cachedEntry.sections || {}).some(function(v) { return v && v.startsWith('❌'); });
+    if (cachedEntry && !isSkim && !hasError) {
       console.log('%c[Alt Deep] 命中缓存，自动展开 ' + cacheKey, 'color:#44bb44');
       _renderDeepCacheToPanel(panel, cachedEntry, index);
       if (arrow) arrow.textContent = '▴';
       return;
     }
     if (cachedEntry) {
-      console.log('%c[Alt Deep] 缓存为无LLM版本，重新执行完整分析', 'color:#f59e0b');
+      var reason = isSkim ? '无LLM版本' : (hasError ? '错误内容' : '未知');
+      console.log('%c[Alt Deep] 缓存无效(' + reason + ')，重新执行完整分析', 'color:#f59e0b');
       delete _altDeepCache[cacheKey];
     }
 
@@ -2051,9 +2054,11 @@
 
             if (section === 'error') {
               console.error('[AltDeep] Error from server:', content);
+              // Don't cache error responses — especially API Key errors.
+              // Clean up the cache so that configuring API Key later works without refresh.
+              delete _altDeepCache[ck];
               for (const [sKey, elId] of Object.entries(sectionIdMap)) {
                 if (!completedSections.has(sKey)) {
-                  _altDeepCache[ck].sections[sKey] = '❌ ' + escapeHtml(content);
                   completedSections.add(sKey);
                 }
                 // Also try DOM if panel still exists

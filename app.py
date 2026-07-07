@@ -3617,17 +3617,19 @@ _PINYIN_FULL = {
 def _build_pinyin_info(name):
     """Build pinyin data for a Chinese stock name.
     Returns dict with:
-      - initials: concatenated first letters (e.g., '贵州茅台' → 'gzmt')
-      - full: concatenated full pinyin (e.g., '贵州茅台' → 'guizhoumaotai')
+      - initials: concatenated first letters, lowercased (e.g., '*ST贵州茅台' → '*stgzmt')
+      - full: concatenated full pinyin, lowercased (e.g., '*ST贵州茅台' → '*stguizhoumaotai')
     Uses pypinyin library if available (covers all Chinese characters),
     falls back to _PINYIN_FULL manual dictionary otherwise.
+    IMPORTANT: Both initials and full are lowercased so that case-insensitive
+    matching works correctly (e.g. user types '*stx' → matches init='*stxl').
     """
     if _HAS_PYPINYIN:
         try:
             initials_list = _pypinyin_func(name, style=_PinyinStyle.FIRST_LETTER, errors='default')
             full_list = _pypinyin_func(name, style=_PinyinStyle.NORMAL, errors='default')
-            initials = ''.join([p[0] for p in initials_list])
-            full = ''.join([''.join(p) for p in full_list])
+            initials = ''.join([p[0] for p in initials_list]).lower()
+            full = ''.join([''.join(p) for p in full_list]).lower()
             return {'initials': initials, 'full': full}
         except Exception:
             pass  # fall through to manual method
@@ -3644,8 +3646,8 @@ def _build_pinyin_info(name):
             # Unknown character: just use the character itself for full, skip initial
             full.append(ch)
     return {
-        'initials': ''.join(initials),
-        'full': ''.join(full),
+        'initials': ''.join(initials).lower(),
+        'full': ''.join(full).lower(),
     }
 
 
@@ -3734,11 +3736,13 @@ def search_stocks():
 
         # --- Non-contiguous name matching: check if all query chars appear in order ---
         # e.g., "光股" → "阳光股份" (光 at pos1, 股 at pos2, in order)
+        # Case-insensitive for English letters (e.g., "*stx" matches "*ST西旅")
         if len(q) >= 2 and score < 500:
             pos = 0
             match = True
-            for ch in q:
-                idx = name.find(ch, pos)
+            search_name = name_lower  # use lowercased name for case-insensitive matching
+            for ch in q_lower:
+                idx = search_name.find(ch, pos)
                 if idx == -1:
                     match = False
                     break

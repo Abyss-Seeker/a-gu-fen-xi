@@ -36,6 +36,13 @@ import numpy as np
 import pandas as pd
 from flask import Flask, request, jsonify, render_template, send_from_directory, Response
 
+# Try to import pypinyin for comprehensive Chinese pinyin support
+try:
+    from pypinyin import pinyin as _pypinyin_func, Style as _PinyinStyle
+    _HAS_PYPINYIN = True
+except ImportError:
+    _HAS_PYPINYIN = False
+
 # API fallback module
 import api_fallback
 
@@ -327,7 +334,7 @@ def _em_fetch(report_name, columns, filter_str, pagesize=8, sort_col="REPORTDATE
             "source": "HSF10",
             "client": "PC",
         }
-        if report_name == "RPT_DMSK_FN_BALANCE":
+        if report_name in ("RPT_DMSK_FN_BALANCE", "RPT_DMSK_FN_INCOME"):
             params["sortColumns"] = "REPORT_DATE"
 
         resp = _http_get(EM_DATACENTER, params=params, timeout=15)
@@ -418,23 +425,51 @@ def get_financial_data(code):
                 "加权ROE": r.get("WEIGHTAVG_ROE"),
             })
 
-    # ---- Fetch gross/net margins from main finance data ----
-    margins_raw = _em_fetch(
-        "RPT_F10_FINANCE_MAINFINADATA",
-        "XSMLL,XSJLL",
-        security_filter,
-        pagesize=1,
-    )
+    # ---- Calculate gross/net margins from annual income statement ----
+    # Use RPT_DMSK_FN_INCOME with annual filter (DATE_TYPE_CODE="001") to get
+    # the latest annual report's raw figures, then calculate margins ourselves.
+    # This matches Tongdaxin F10's methodology (annual, not latest quarterly).
     gross_margin = None
     net_margin = None
-    if margins_raw:
-        mr = margins_raw[0]
-        gm = mr.get("XSMLL")
-        nm = mr.get("XSJLL")
-        if gm is not None and float(gm) != 0:
-            gross_margin = round(float(gm), 2)
-        if nm is not None and float(nm) != 0:
-            net_margin = round(float(nm), 2)
+    annual_filter = f'{security_filter}(DATE_TYPE_CODE="001")'
+    income_detail_raw = _em_fetch(
+        "RPT_DMSK_FN_INCOME",
+        "TOTAL_OPERATE_INCOME,OPERATE_COST,PARENT_NETPROFIT",
+        annual_filter,
+        pagesize=1,
+        sort_col="REPORT_DATE",
+    )
+    if income_detail_raw:
+        ar = income_detail_raw[0]
+        ti = ar.get("TOTAL_OPERATE_INCOME")
+        oc = ar.get("OPERATE_COST")
+        pn = ar.get("PARENT_NETPROFIT")
+        if ti and float(ti) != 0 and oc is not None:
+            gm_val = (float(ti) - float(oc)) / float(ti) * 100
+            gross_margin = round(gm_val, 2)
+        if ti and float(ti) != 0 and pn is not None:
+            nm_val = float(pn) / float(ti) * 100
+            net_margin = round(nm_val, 2)
+
+    # Fallback: if annual income statement fetch failed, use pre-calculated XSMLL/XSJLL
+    # (Note: these return latest quarterly data, which may differ from annual)
+    if gross_margin is None or net_margin is None:
+        margins_raw = _em_fetch(
+            "RPT_F10_FINANCE_MAINFINADATA",
+            "XSMLL,XSJLL",
+            security_filter,
+            pagesize=1,
+        )
+        if margins_raw:
+            mr = margins_raw[0]
+            if gross_margin is None:
+                gm = mr.get("XSMLL")
+                if gm is not None and float(gm) != 0:
+                    gross_margin = round(float(gm), 2)
+            if net_margin is None:
+                nm = mr.get("XSJLL")
+                if nm is not None and float(nm) != 0:
+                    net_margin = round(float(nm), 2)
 
     return {
         "income": income,
@@ -3583,8 +3618,20 @@ def _build_pinyin_info(name):
     Returns dict with:
       - initials: concatenated first letters (e.g., '贵州茅台' → 'gzmt')
       - full: concatenated full pinyin (e.g., '贵州茅台' → 'guizhoumaotai')
-      - full_compact: full pinyin without tone marks
+    Uses pypinyin library if available (covers all Chinese characters),
+    falls back to _PINYIN_FULL manual dictionary otherwise.
     """
+    if _HAS_PYPINYIN:
+        try:
+            initials_list = _pypinyin_func(name, style=_PinyinStyle.FIRST_LETTER, errors='default')
+            full_list = _pypinyin_func(name, style=_PinyinStyle.NORMAL, errors='default')
+            initials = ''.join([p[0] for p in initials_list])
+            full = ''.join([''.join(p) for p in full_list])
+            return {'initials': initials, 'full': full}
+        except Exception:
+            pass  # fall through to manual method
+
+    # Fallback: manual dictionary
     initials = []
     full = []
     for ch in name:

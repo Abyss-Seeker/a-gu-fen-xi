@@ -4,3 +4,9 @@ __pycache__/
 *.pyc
 venv/
 .env
+
+# 本地临时/诊断脚本（不进版本库）
+diag.py
+hk_us_list.py
+run8899.py
+test_search.py

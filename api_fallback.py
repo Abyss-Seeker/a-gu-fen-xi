@@ -312,22 +312,39 @@ def sina_get_market_indices():
 # 4. EastMoney K-line fallback for get_price_history
 # ==============================
 
-EM_KLINE_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
+# NOTE: Must use HTTP (not HTTPS) — EastMoney TLS fails on Vercel and in some
+# local environments (HTTPS raises RemoteDisconnected). HTTP works reliably.
+EM_KLINE_URL = "http://push2his.eastmoney.com/api/qt/stock/kline/get"
 
-def em_get_price_history(code, days=250):
+def em_get_price_history(code, days=250, market=None):
     """
     Get K-line data from EastMoney API.
-    Supports IPO-level data: up to ~7000 bars (30+ years).
+    Supports IPO-level data: up to ~7000 bars (30+ years) for A-shares,
+    and full history for HK (116.xxxxx) and US (105.TICKER) markets.
 
     Returns: list of {日期, 开盘, 收盘, 最高, 最低, 成交量},
              same structure as get_price_history().
     """
     try:
-        symbol = code.replace(".SZ", "").replace(".SH", "").replace(".BJ", "")
-        if code.endswith(".SZ"):
-            secid = f"0.{symbol}"
+        # Determine market if not explicitly passed, from code suffix.
+        if market is None:
+            if code.endswith(".HK"):
+                market = "HK"
+            elif code.endswith(".US"):
+                market = "US"
+            else:
+                market = "A"
+
+        if market == "HK":
+            symbol = code.replace(".HK", "").zfill(5)
+            secid = f"116.{symbol}"
+        elif market == "US":
+            symbol = code.replace(".US", "").replace(".OQ", "").replace(".N", "")
+            secid = f"105.{symbol}"
         else:
-            secid = f"1.{symbol}"
+            # A-share
+            symbol = code.replace(".SZ", "").replace(".SH", "").replace(".BJ", "")
+            secid = f"0.{symbol}" if code.endswith(".SZ") else f"1.{symbol}"
 
         # Request more than needed — API caps at ~7000 naturally
         request_lmt = max(days + 100, 8000)

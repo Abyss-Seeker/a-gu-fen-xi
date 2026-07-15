@@ -32,6 +32,7 @@ os.environ["no_proxy"] = "*"
 # Now safe to import
 import requests
 import re
+import math
 import numpy as np
 import pandas as pd
 from flask import Flask, request, jsonify, render_template, send_from_directory, Response
@@ -47,11 +48,54 @@ except ImportError:
 # API fallback module
 import api_fallback
 
+# Curated HK/US stock list for local fuzzy search (pinyin + fuzzy, like A-shares)
+try:
+    from hk_us_list import HK_US_STOCKS
+except ImportError:
+    print("[hk_us_list] hk_us_list.py not found, HK/US fuzzy search limited to smartbox")
+    HK_US_STOCKS = {"HK": [], "US": []}
+
 # ----- Trust no proxy: create a dedicated session that never touches system proxy settings -----
 _http_session = requests.Session()
 _http_session.trust_env = False
 
 app = Flask(__name__)
+
+# ---- Safe JSON provider: never emit NaN / Infinity (invalid JSON) ----
+# yfinance / EastMoney occasionally yield NaN; Python's json.dumps serializes
+# those as the literal `NaN`, which JSON.parse on the frontend rejects
+# ("Unexpected token 'N'"). Recursively coerce non-finite floats to null.
+from flask.json.provider import DefaultJSONProvider
+
+def _sanitize_json(obj):
+    # numpy scalars (e.g. np.float64 nan from EastMoney's financial parser)
+    # are NOT Python float subclasses, so normalize them to native types first.
+    if isinstance(obj, np.generic):
+        try:
+            obj = obj.item()
+        except Exception:
+            return obj
+    if isinstance(obj, bool):
+        return obj
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    if isinstance(obj, dict):
+        return {k: _sanitize_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple, set)):
+        return [_sanitize_json(v) for v in obj]
+    return obj
+
+class _SafeJSONProvider(DefaultJSONProvider):
+    def dumps(self, obj, **kwargs):
+        kwargs.setdefault("allow_nan", False)
+        return super().dumps(_sanitize_json(obj), **kwargs)
+    def dump(self, obj, fp, **kwargs):
+        kwargs.setdefault("allow_nan", False)
+        return super().dump(_sanitize_json(obj), fp, **kwargs)
+
+app.json = _SafeJSONProvider(app)
 
 
 # ---- After-request hook: inject API fallback status header ----
@@ -159,6 +203,75 @@ REQ_HEADERS = {
     "Referer": "https://gu.qq.com/",
 }
 
+# ========== Cross-Market Support (Beta) ==========
+MARKET_CONFIG = {
+    "A": {
+        "name": "A股",
+        "suffixes": [".SZ", ".SH", ".BJ"],
+        "tc_prefixes": {"SZ": "sz", "SH": "sh", "BJ": "bj"},
+        "default_prefix": "sz",
+        "indices": {
+            "shanghai": ("sh000001", "上证指数"),
+            "shenzhen": ("sz399001", "深证成指"),
+            "chinext": ("sz399006", "创业板指"),
+        },
+        "currency": "¥",
+        "currency_label": "元",
+        "mv_unit": "亿",
+        "search_t_code": "gp",
+        "has_limit_price": True,
+    },
+    "HK": {
+        "name": "港股",
+        "suffixes": [".HK"],
+        "tc_prefix": "hk",
+        "default_prefix": "hk",
+        "indices": {
+            "hsi": ("hkHSI", "恒生指数"),
+            "hscei": ("hkHSCEI", "恒生中国企业"),
+            "hstech": ("hkHSTECH", "恒生科技"),
+        },
+        "currency": "HK$",
+        "currency_label": "港元",
+        "mv_unit": "亿",
+        "search_t_code": "hk",
+        "has_limit_price": False,
+    },
+    "US": {
+        "name": "美股",
+        "suffixes": [".US"],
+        "tc_prefix": "us",
+        "default_prefix": "us",
+        "indices": {
+            "sp500": ("usINX", "标普500"),
+            "nasdaq": ("usIXIC", "纳斯达克"),
+            "dow": ("usDJI", "道琼斯"),
+        },
+        "currency": "$",
+        "currency_label": "美元",
+        "mv_unit": "亿",
+        "search_t_code": "us",
+        "has_limit_price": False,
+    },
+}
+
+def detect_market(code):
+    """Return (market_key, symbol) from a full stock code."""
+    code = code.strip().upper()
+    if ".HK" in code:
+        return "HK", code.replace(".HK", "")
+    if ".US" in code:
+        return "US", code.replace(".US", "")
+    if any(s in code for s in [".SZ", ".SH", ".BJ"]):
+        return "A", code
+    # Bare numeric → A-share
+    if code.isdigit() and 1 <= len(code) <= 6:
+        return "A", code
+    # Alphabetic ticker → US
+    if any(c.isalpha() for c in code) and not code.isdigit():
+        return "US", code
+    return "A", code
+
 def _http_get(url, params=None, timeout=15, headers_extra=None):
     """HTTP GET using trust_env=False session — never touches system proxy."""
     headers = dict(REQ_HEADERS)
@@ -166,8 +279,15 @@ def _http_get(url, params=None, timeout=15, headers_extra=None):
         headers.update(headers_extra)
     return _http_session.get(url, params=params, headers=headers, timeout=timeout)
 
-def _tencent_code(code):
-    """Convert standard code to Tencent format: sz000001, sh600519"""
+def _tencent_code(code, market="A"):
+    """Convert standard code to Tencent format: sz000001, sh600519, hk00700, usAAPL"""
+    if market == "HK":
+        symbol = code.replace(".HK", "")
+        return f"hk{symbol}"
+    if market == "US":
+        symbol = code.replace(".US", "")
+        return f"us{symbol}"
+    # A-share
     symbol = code.replace(".SZ", "").replace(".SH", "").replace(".BJ", "")
     if ".SZ" in code:
         prefix = "sz"
@@ -185,16 +305,16 @@ def _tencent_code(code):
         prefix = "sz"
     return f"{prefix}{symbol}"
 
-def get_stock_info(code):
-    """Get stock basic info via Tencent real-time quote API."""
+def get_stock_info(code, market="A"):
+    """Get stock basic info via Tencent real-time quote API. Market-aware field mapping."""
     cache_key = f"info_{code}"
     cached_val = cached(cache_key)
     if cached_val:
         return cached_val
 
     try:
-        tc = _tencent_code(code)
-        symbol = code.replace(".SZ", "").replace(".SH", "").replace(".BJ", "")
+        tc = _tencent_code(code, market)
+        symbol = code.replace(".SZ", "").replace(".SH", "").replace(".BJ", "").replace(".HK", "").replace(".US", "")
         resp = _http_get(f"{TENCENT_QT}{tc}")
         text = resp.text
 
@@ -209,73 +329,125 @@ def get_stock_info(code):
         if len(fields) < 45:
             return {}
 
-        # Tencent real-time quote field mapping (index-based):
-        # 0: unknown, 1: name, 2: code, 3: current price, 4: prev close,
-        # 5: open, 6: volume(lots), 7: outer, 8: inner,
-        # 30: date, 31: change, 32: change%, 33: high, 34: low,
-        # 35: price/volume/amount, 36: volume, 37: amount(wan),
-        # 38: turnover%, 39: PE, 40: unknown, 41: high2, 42: low2,
-        # 43: amplitude%, 44: circulation market cap, 45: total market cap,
-        # 46: PB, 47:涨停价, 48:跌停价
+        # Market-specific field mapping
+        if market in ("HK", "US"):
+            # HK/US: similar to A-share but some fields shifted
+            # 1:name, 2:code, 3:price, 4:prev_close, 5:open, 6:volume(lots),
+            # 30:date, 31:change, 32:change%, 33:high, 34:low,
+            # 36:volume, 37:amount, 38:turnover%, 39:PE,
+            # 44:circ_mv, 45:total_mv, 46:eng_name, 47:(varies),
+            # For HK: PB may be in extended fields; for US, different structure
+            _safe_float = lambda i: float(fields[i]) if len(fields) > i and fields[i] else 0
+            # Try to determine PB from available fields
+            pb_val = 0
+            # For HK, PB is typically at index 72; turnover is at index 59 (not 38)
+            if market == "HK" and len(fields) > 72 and fields[72]:
+                try: pb_val = float(fields[72])
+                except: pass
+            hk_turnover = _safe_float(59) if market == "HK" else _safe_float(38)
+            info = {
+                "股票简称": fields[1] if len(fields) > 1 else "",
+                "最新价": _safe_float(3),
+                "昨收": _safe_float(4),
+                "今开": _safe_float(5),
+                "最高价": _safe_float(33),
+                "最低价": _safe_float(34),
+                "涨跌幅": _safe_float(32),
+                "涨跌额": _safe_float(31),
+                "换手率": hk_turnover,
+                "市盈率-动态": _safe_float(39),
+                "市净率": pb_val,
+                "总市值": _safe_float(45),
+                "流通市值": _safe_float(44),
+                "成交量": int(_safe_float(36)) if len(fields) > 36 and fields[36] else 0,
+                "成交额": _safe_float(37),
+            }
+        else:
+            # A-share original mapping (index-based):
+            # 0: unknown, 1: name, 2: code, 3: current price, 4: prev close,
+            # 5: open, 6: volume(lots), 7: outer, 8: inner,
+            # 30: date, 31: change, 32: change%, 33: high, 34: low,
+            # 38: turnover%, 39: PE, 40: unknown, 41: high2, 42: low2,
+            # 43: amplitude%, 44: circulation market cap, 45: total market cap,
+            # 46: PB, 47:涨停价, 48:跌停价
+            info = {
+                "股票简称": fields[1] if len(fields) > 1 else "",
+                "最新价": float(fields[3]) if fields[3] else 0,
+                "昨收": float(fields[4]) if fields[4] else 0,
+                "今开": float(fields[5]) if fields[5] else 0,
+                "最高价": float(fields[33]) if len(fields) > 33 and fields[33] else 0,
+                "最低价": float(fields[34]) if len(fields) > 34 and fields[34] else 0,
+                "涨跌幅": float(fields[32]) if len(fields) > 32 and fields[32] else 0,
+                "换手率": float(fields[38]) if len(fields) > 38 and fields[38] else 0,
+                "市盈率-动态": float(fields[39]) if len(fields) > 39 and fields[39] else 0,
+                "市净率": float(fields[46]) if len(fields) > 46 and fields[46] else 0,
+                "总市值": float(fields[45]) if len(fields) > 45 and fields[45] else 0,
+                "流通市值": float(fields[44]) if len(fields) > 44 and fields[44] else 0,
+                "成交量": int(float(fields[6])) if len(fields) > 6 and fields[6] else 0,
+                "成交额": float(fields[37]) if len(fields) > 37 and fields[37] else 0,
+            }
 
-        info = {
-            "股票简称": fields[1] if len(fields) > 1 else "",
-            "最新价": float(fields[3]) if fields[3] else 0,
-            "昨收": float(fields[4]) if fields[4] else 0,
-            "今开": float(fields[5]) if fields[5] else 0,
-            "最高价": float(fields[33]) if len(fields) > 33 and fields[33] else 0,
-            "最低价": float(fields[34]) if len(fields) > 34 and fields[34] else 0,
-            "涨跌幅": float(fields[32]) if len(fields) > 32 and fields[32] else 0,
-            "换手率": float(fields[38]) if len(fields) > 38 and fields[38] else 0,
-            "市盈率-动态": float(fields[39]) if len(fields) > 39 and fields[39] else 0,
-            "市净率": float(fields[46]) if len(fields) > 46 and fields[46] else 0,
-            "总市值": float(fields[45]) if len(fields) > 45 and fields[45] else 0,
-            "流通市值": float(fields[44]) if len(fields) > 44 and fields[44] else 0,
-            "成交量": int(float(fields[6])) if len(fields) > 6 and fields[6] else 0,
-            "成交额": float(fields[37]) if len(fields) > 37 and fields[37] else 0,
-        }
+        # US PB fallback via yfinance (Tencent doesn't provide PB for US)
+        if market == "US" and info.get("市净率", 0) == 0:
+            try:
+                import yfinance as yf
+                ticker = yf.Ticker(symbol)
+                fast_pb = (ticker.fast_info or {}).get('price_to_book', 0)
+                if fast_pb:
+                    info["市净率"] = round(float(fast_pb), 2)
+                else:
+                    # fallback to info dict
+                    yf_info = ticker.info or {}
+                    yf_pb = yf_info.get('priceToBook', 0)
+                    if yf_pb:
+                        info["市净率"] = round(float(yf_pb), 2)
+            except Exception:
+                pass  # keep PB = 0 if yfinance fails
 
         cache_set(cache_key, info)
         return info
     except Exception as e:
         print(f"[PRIMARY] Error fetching stock info for {code}: {e}")
 
-    # ---- Fallback: Sina Finance ----
-    try:
-        fb_info = api_fallback.sina_get_stock_info(code)
-        if fb_info and fb_info.get("最新价"):
-            fb_info["_fb_source"] = "sina"
-            cache_set(cache_key, fb_info)
-            return fb_info
-    except Exception as fe:
-        print(f"[FALLBACK] Sina also failed for {code}: {fe}")
+    # ---- Fallback: Sina Finance (A-share only) ----
+    if market == "A":
+        try:
+            fb_info = api_fallback.sina_get_stock_info(code)
+            if fb_info and fb_info.get("最新价"):
+                fb_info["_fb_source"] = "sina"
+                cache_set(cache_key, fb_info)
+                return fb_info
+        except Exception as fe:
+            print(f"[FALLBACK] Sina also failed for {code}: {fe}")
 
     return {}
 
 
-def get_price_history(code, days=250):
+def get_price_history(code, days=250, market="A"):
     """Get historical K-line data.
-    Primary: EastMoney API (supports IPO-level, up to ~7000 bars)
-    Fallback: Tencent kline API (limited to ~640 bars, 2.5 years)
+    Primary: EastMoney API (supports IPO-level, up to ~7000 bars) — A-share only.
+    Fallback: Tencent kline API (limited to ~640 bars, 2.5 years) — all markets.
     """
     cache_key = f"price_{code}"
     cached_val = cached(cache_key, ttl=600)
     if cached_val:
         return cached_val
 
-    # ---- Layer 1: EastMoney K-line (IPO-level) ----
+    # ---- Layer 1: EastMoney K-line (A / HK / US) ----
+    # EastMoney provides full IPO-level history for all three markets.
+    # secid: A=0./1., HK=116.xxxxx, US=105.TICKER
     try:
-        result = api_fallback.em_get_price_history(code, 8000)
+        result = api_fallback.em_get_price_history(code, 8000, market=market)
         if result and len(result) >= 10:
-            print(f"[get_price_history] EastMoney: {len(result)} klines for {code}")
+            print(f"[get_price_history] EastMoney({market}): {len(result)} klines for {code}")
             cache_set(cache_key, result)
             return result
     except Exception as e:
         print(f"[get_price_history] EastMoney failed: {e}")
 
-    # ---- Layer 2: Tencent K-line (fallback, max ~640 bars) ----
+    # ---- Layer 2: Tencent K-line (all markets) ----
     try:
-        tc = _tencent_code(code)
+        tc = _tencent_code(code, market)
         # Request 800 to get max available (~640 for most stocks, ~2.5 years)
         tc_days = max(days, 800)
         kline_url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
@@ -360,8 +532,565 @@ def _em_fetch(report_name, columns, filter_str, pagesize=8, sort_col="REPORTDATE
         return []
 
 
-def get_financial_data(code):
-    """Fetch financial statements from EastMoney Datacenter API."""
+# ========== Cross-Market Financial Data (yfinance) ==========
+# NOTE: yfinance import at module level to avoid Flask-context threading issues
+
+try:
+    import yfinance as yf
+    _YF_AVAILABLE = True
+except ImportError:
+    _YF_AVAILABLE = False
+
+YF_CACHE = {}
+
+
+def _fy_code(code, market):
+    """Convert code to yfinance ticker format. 00700.HK→0700.HK (4-digit), AAPL.US→AAPL."""
+    symbol = code.replace(".SZ", "").replace(".SH", "").replace(".BJ", "").replace(".HK", "").replace(".US", "")
+    if market == "HK":
+        # yfinance expects exactly 4-digit HK code: 0700.HK, 9988.HK, 0005.HK
+        num = str(int(symbol))  # strip leading zeros
+        padded = num.zfill(4)   # pad to 4 digits
+        return f"{padded}.HK"
+    return symbol  # US: plain ticker
+
+
+def _fetch_financials_yfinance(code, market):
+    """Fetch financial statements via yfinance (subprocess isolation to avoid Flask threading issues)."""
+    cache_key = f"yf_{code}"
+    if cache_key in YF_CACHE:
+        return YF_CACHE[cache_key]
+
+    if not _YF_AVAILABLE:
+        return None
+
+    try:
+        ticker_sym = _fy_code(code, market)
+        ticker = yf.Ticker(ticker_sym)
+        inc = ticker.income_stmt
+        bal = ticker.balance_sheet
+
+        # yfinance data access may fail in Flask's parent process context;
+        # fall back to subprocess isolation if DataFrames are empty
+        if inc is not None and not inc.empty and bal is not None and not bal.empty:
+            return _parse_yfinance_data(inc, bal, ticker_sym, ticker)
+
+        # ---- Subprocess isolation fallback ----
+        print(f"[yfinance] Flask-context empty, trying subprocess for {ticker_sym}", flush=True)
+        import json, subprocess, os, sys as _sys
+        py_code = f"""
+import yfinance as yf, json, sys, os, traceback
+try:
+    # Clear yfinance cache
+    yf.set_tz_cache_location(None)
+    t = yf.Ticker('{ticker_sym}')
+    inc = t.income_stmt
+    bal = t.balance_sheet
+    if hasattr(inc, 'empty'):
+        empty_flag = inc.empty
+    else:
+        empty_flag = inc is None
+    print(json.dumps({{'status': 'ok', 'inc_empty': empty_flag, 'bal_empty': bal.empty if hasattr(bal,'empty') else True, 'inc_type': str(type(inc).__name__) }}), flush=True)
+    if empty_flag or (hasattr(bal,'empty') and bal.empty):
+        sys.exit(0)
+    inc_json = inc.to_dict()
+    bal_json = bal.to_dict()
+    print(json.dumps({{'income': inc_json, 'balance': bal_json}}), flush=True)
+except Exception as e:
+    print(json.dumps({{'status': 'error', 'msg': str(e), 'trace': traceback.format_exc()}}), flush=True)
+"""
+        result = subprocess.run(
+            [_sys.executable, "-c", py_code],
+            capture_output=True, text=True, timeout=60
+        )
+
+        if result.returncode != 0:
+            print(f"[yfinance] Subprocess error: stderr={result.stderr[:300]}", flush=True)
+            return None
+
+        if not result.stdout.strip():
+            print(f"[yfinance] Subprocess returned empty stdout", flush=True)
+            return None
+
+        data = json.loads(result.stdout.splitlines()[-1].strip())  # take last line (JSON data)
+        if data.get("status") == "error":
+            print(f"[yfinance] Subprocess error: {data.get('msg','?')[:200]}", flush=True)
+            return None
+        if data.get("inc_empty", True):
+            print(f"[yfinance] Subprocess: yfinance returned empty DataFrames (rate-limited?)", flush=True)
+            return None
+
+        # Reconstruct DataFrames from JSON
+        import pandas as pd
+        inc_df = pd.DataFrame.from_dict(data["income"])
+        bal_df = pd.DataFrame.from_dict(data["balance"])
+        qinc_df = pd.DataFrame.from_dict(data.get("quarterly", {}))
+
+        # Parse with the dedicated helper
+        return _parse_yfinance_data(inc_df, bal_df, ticker_sym, ticker, qinc_df)
+
+    except Exception as e:
+        print(f"[yfinance] Financial fetch failed for {code} ({market}): {e}")
+        return None
+
+
+def _parse_yfinance_data(inc, bal, ticker_sym, ticker, quarterly_df=None):
+    """Parse yfinance DataFrames into A-share-compatible financial dict."""
+    # ---- Row name mappings ----
+    def _find_row(df, candidates):
+        for c in candidates:
+            if c in df.index:
+                return c
+        return None
+
+    rev_row = _find_row(inc, ["Total Revenue", "Operating Revenue"])
+    ni_row = _find_row(inc, ["Net Income Common Stockholders", "Net Income"])
+    eps_row = _find_row(inc, ["Diluted EPS", "Basic EPS"])
+    cost_row = _find_row(inc, ["Cost Of Revenue", "Reconciled Cost Of Revenue"])
+    asset_row = _find_row(bal, ["Total Assets"])
+    liab_row = _find_row(bal, ["Total Liabilities Net Minority Interest", "Total Liabilities"])
+    equity_row = _find_row(bal, ["Stockholders Equity", "Total Equity Gross Minority Interest"])
+
+    if not rev_row or not ni_row or not asset_row:
+        return None
+
+    # ---- Build income list (annual reports, latest 5 years) ----
+    income_cols = list(inc.columns)[:5]
+    income = []
+    for idx, col in enumerate(income_cols):
+        rev = float(inc.loc[rev_row, col]) if rev_row in inc.index else 0
+        ni = float(inc.loc[ni_row, col]) if ni_row in inc.index else 0
+        eps = float(inc.loc[eps_row, col]) if eps_row and eps_row in inc.index else 0
+        cost = float(inc.loc[cost_row, col]) if cost_row and cost_row in inc.index else 0
+        equity_val = float(bal.loc[equity_row, col]) if equity_row and equity_row in bal.index and col in bal.columns else None
+
+        roe = (ni / equity_val * 100) if equity_val and equity_val != 0 else 0
+        rev_yoy = ni_yoy = 0
+        if idx < len(income_cols) - 1:
+            prev_col = income_cols[idx + 1]
+            prev_rev = float(inc.loc[rev_row, prev_col]) if rev_row in inc.index else 0
+            prev_ni = float(inc.loc[ni_row, prev_col]) if ni_row in inc.index else 0
+            rev_yoy = ((rev - prev_rev) / prev_rev * 100) if prev_rev != 0 else 0
+            ni_yoy = ((ni - prev_ni) / prev_ni * 100) if prev_ni != 0 else 0
+
+        income.append({
+            "报告期": str(col)[:10], "报告类型": "年报", "年份": str(col)[:4],
+            "营业总收入": rev, "归母净利润": ni, "基本每股收益": eps,
+            "加权ROE": round(roe, 2),
+            "每股净资产": round(equity_val / (float(inc.loc["Diluted Average Shares", col]) if "Diluted Average Shares" in inc.index else 1), 2) if equity_val else 0,
+            "每股经营现金流": 0,
+            "营收同比": round(rev_yoy, 2), "净利同比": round(ni_yoy, 2),
+        })
+
+    # ---- Build balance list ----
+    bal_cols = list(bal.columns)[:5]
+    balance = []
+    for col in bal_cols:
+        assets = float(bal.loc[asset_row, col]) if asset_row in bal.index else 0
+        liab = float(bal.loc[liab_row, col]) if liab_row and liab_row in bal.index else 0
+        eq = float(bal.loc[equity_row, col]) if equity_row and equity_row in bal.index else 0
+        balance.append({
+            "报告期": str(col)[:10], "报告类型": "年报", "年份": str(col)[:4],
+            "总资产": assets, "总负债": liab, "净资产": eq,
+            "资产负债率": round((liab / assets * 100) if assets else 0, 2),
+        })
+
+    # ---- Quarterly income ----
+    quarterly_inc = []
+    if quarterly_df is not None and not quarterly_df.empty:
+        for col in list(quarterly_df.columns)[:8]:
+            if rev_row in quarterly_df.index and ni_row in quarterly_df.index:
+                quarterly_inc.append({
+                    "报告期": str(col)[:10], "报告类型": "季报",
+                    "营业总收入": float(quarterly_df.loc[rev_row, col]),
+                    "归母净利润": float(quarterly_df.loc[ni_row, col]),
+                    "基本每股收益": float(quarterly_df.loc[eps_row, col]) if eps_row and eps_row in quarterly_df.index else 0,
+                    "加权ROE": 0,
+                })
+
+    # ---- Gross/Net Margin ----
+    latest_col = income_cols[0]
+    rev_latest = float(inc.loc[rev_row, latest_col]) if rev_row in inc.index else 0
+    cost_latest = float(inc.loc[cost_row, latest_col]) if cost_row and cost_row in inc.index else 0
+    ni_latest = float(inc.loc[ni_row, latest_col]) if ni_row in inc.index else 0
+    gross_margin = round((rev_latest - cost_latest) / rev_latest * 100, 2) if rev_latest and cost_latest else None
+    net_margin = round(ni_latest / rev_latest * 100, 2) if rev_latest and rev_latest != 0 else None
+
+    return {
+        "income": income, "balance": balance, "quarterly": quarterly_inc,
+        "gross_margin": gross_margin, "net_margin": net_margin,
+        "_source": "yfinance",
+    }
+
+
+def _fetch_fundamentals_http(code, market, yahoo_symbol):
+    """Fetch fundamentals via direct Yahoo Finance HTTP API (query1/v10)."""
+    try:
+        url = f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{yahoo_symbol}"
+        params = {"modules": "financialData,defaultKeyStatistics,summaryDetail,incomeStatementHistory,balanceSheetHistory"}
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        resp = _http_get(url, params=params, timeout=15, headers_extra=headers)
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        result = data.get("quoteSummary", {}).get("result", [])
+        if not result: return None
+
+        summary = result[0]
+        income_hist = summary.get("incomeStatementHistory", {}).get("incomeStatementHistory", [])
+        balance_hist = summary.get("balanceSheetHistory", {}).get("balanceSheetHistory", [])
+        if not income_hist or not balance_hist: return None
+
+        # Income
+        income = []
+        for entry in income_hist[:5]:
+            e = entry.get("endDate", {}).get("fmt", "") or ""
+            rev = (entry.get("totalRevenue", {}) or {}).get("raw", 0)
+            ni = (entry.get("netIncomeToCommon", {}) or {}).get("raw", 0)
+            income.append({"报告期": e[:10], "报告类型": "年报", "年份": e[:4],
+                "营业总收入": rev, "归母净利润": ni, "基本每股收益": 0, "加权ROE": 0,
+                "每股净资产": 0, "每股经营现金流": 0, "营收同比": 0, "净利同比": 0})
+        for i in range(len(income) - 1):
+            if income[i+1]["营业总收入"] and income[i]["营业总收入"]:
+                income[i]["营收同比"] = round((income[i]["营业总收入"] - income[i+1]["营业总收入"]) / income[i+1]["营业总收入"] * 100, 2)
+            if income[i+1]["归母净利润"] and income[i]["归母净利润"]:
+                income[i]["净利同比"] = round((income[i]["归母净利润"] - income[i+1]["归母净利润"]) / abs(income[i+1]["归母净利润"]) * 100, 2)
+
+        # Balance
+        balance = []
+        for entry in balance_hist[:5]:
+            e = entry.get("endDate", {}).get("fmt", "") or ""
+            assets = (entry.get("totalAssets", {}) or {}).get("raw", 0)
+            liab = (entry.get("totalLiab", {}) or {}).get("raw", 0)
+            eq = (entry.get("totalStockholderEquity", {}) or {}).get("raw", 0)
+            balance.append({"报告期": e[:10], "报告类型": "年报", "年份": e[:4],
+                "总资产": assets, "总负债": liab, "净资产": eq,
+                "资产负债率": round((liab / assets * 100) if assets else 0, 2)})
+
+        if income and balance:
+            eq_l = balance[0].get("净资产", 0); ni_l = income[0].get("归母净利润", 0)
+            if eq_l and ni_l: income[0]["加权ROE"] = round(ni_l / eq_l * 100, 2)
+
+        print(f"[yahoo_http] OK for {yahoo_symbol}: {len(income)} income items", flush=True)
+        return {"income": income, "balance": balance, "quarterly": [],
+                "gross_margin": None, "net_margin": None, "_source": "yahoo_http"}
+    except Exception as e:
+        print(f"[yahoo_http] Failed: {e}", flush=True)
+        return None
+
+
+def _fetch_from_yf_info(code, market, ticker_sym):
+    """Fetch key financial metrics from yfinance ticker.info (lightweight, no DataFrame issues).
+    Uses a fresh requests Session to avoid Flask-context threading issues."""
+    try:
+        import yfinance as yf, requests as _req
+        # Create a fresh Ticker with a clean session
+        sess = _req.Session()
+        sess.trust_env = False
+        t = yf.Ticker(ticker_sym, session=sess)
+        info = t.info or {}
+        if not info or 'totalRevenue' not in info:
+            return None
+
+        # _to_float kills NaN/Inf returned by yfinance (e.g. missing returnOnEquity
+        # comes back as float('nan'), and `nan or 0` is still nan in Python).
+        rev = _to_float(info.get('totalRevenue'))
+        ni = _to_float(info.get('netIncomeToCommon'))
+        roe = _to_float(info.get('returnOnEquity')) * 100  # yfinance gives decimal
+        gm = _to_float(info.get('grossMargins')) * 100
+        nm = _to_float(info.get('profitMargins')) * 100
+        rev_growth = _to_float(info.get('revenueGrowth')) * 100
+        dte = _to_float(info.get('debtToEquity'))
+        dar = (dte / (1 + dte) * 100) if dte else 0  # debt ratio from D/E
+        bps = _to_float(info.get('bookValue'))
+        eps = _to_float(info.get('trailingEps'))
+
+        income = [{
+            "报告期": now_cn().strftime("%Y-%m-%d"), "报告类型": "年报",
+            "年份": str(now_cn().year), "营业总收入": rev, "归母净利润": ni,
+            "基本每股收益": eps, "加权ROE": round(roe, 2),
+            "每股净资产": bps, "每股经营现金流": 0,
+            "营收同比": round(rev_growth, 2), "净利同比": 0,
+        }]
+        balance = [{
+            "报告期": now_cn().strftime("%Y-%m-%d"), "报告类型": "年报",
+            "年份": str(now_cn().year),
+            "总资产": 0, "总负债": 0, "净资产": 0,
+            "资产负债率": round(dar, 2),
+        }]
+        print(f"[yf_info] OK for {ticker_sym}: ROE={roe:.1f}% rev_growth={rev_growth:.1f}% GM={gm:.1f}%", flush=True)
+        return {
+            "income": income, "balance": balance, "quarterly": [],
+            "gross_margin": round(gm, 2) if gm else None,
+            "net_margin": round(nm, 2) if nm else None,
+            "_source": "yf_info",
+        }
+    except Exception as e:
+        print(f"[yf_info] Failed for {ticker_sym}: {e}", flush=True)
+        return None
+
+
+# ========== Cross-market API key helpers ==========
+
+def _get_api_key(key_name):
+    """Get API key from config.json data_source section."""
+    try:
+        cfg = load_config()
+        ds = cfg.get("data_source", {})
+        return ds.get(key_name, "") or ""
+    except Exception:
+        return ""
+
+
+def _fetch_alpha_vantage_financials(code, market):
+    """Fallback: Alpha Vantage free API (needs key in config.json)."""
+    api_key = _get_api_key("alpha_vantage_key")
+    if not api_key:
+        return None
+    try:
+        symbol = code.replace(".SZ", "").replace(".SH", "").replace(".BJ", "").replace(".HK", "").replace(".US", "")
+        url = "https://www.alphavantage.co/query"
+        params = {"function": "OVERVIEW", "symbol": symbol, "apikey": api_key}
+        resp = _http_get(url, params=params, timeout=15)
+        data = resp.json()
+        if "Error" in data or "Note" in data or not data.get("Symbol"):
+            return None
+
+        roe_r = float(data.get("ReturnOnEquityTTM", 0) or 0)  # in percent
+        gm = float(data.get("GrossProfitTTM", 0) or 0)  # raw value
+        rev = float(data.get("RevenueTTM", 0) or 0)
+        ni = float(data.get("NetIncomeTTM", 0) or 0)
+        eps = float(data.get("EPS", 0) or 0)
+        rev_growth = float(data.get("QuarterlyRevenueGrowthYOY", 0) or 0) * 100
+
+        income = [{
+            "报告期": now_cn().strftime("%Y-%m-%d"), "报告类型": "年报",
+            "年份": str(now_cn().year), "营业总收入": rev, "归母净利润": ni,
+            "基本每股收益": eps, "加权ROE": round(roe_r, 2),
+            "每股净资产": 0, "每股经营现金流": 0,
+            "营收同比": round(rev_growth, 2), "净利同比": 0,
+        }]
+        return {"income": income, "balance": [], "quarterly": [],
+                "gross_margin": round(gm / rev * 100, 2) if rev and gm else None,
+                "net_margin": round(ni / rev * 100, 2) if rev and ni else None,
+                "_source": "alpha_vantage"}
+    except Exception as e:
+        print(f"[alpha_vantage] Failed: {e}", flush=True)
+        return None
+
+
+def _fetch_fmp_financials(code, market):
+    """Fallback: Financial Modeling Prep free API (needs key in config.json)."""
+    api_key = _get_api_key("fmp_key")
+    if not api_key:
+        return None
+    try:
+        symbol = code.replace(".SZ", "").replace(".SH", "").replace(".BJ", "").replace(".HK", "").replace(".US", "")
+        url = f"https://financialmodelingprep.com/api/v3/income-statement/{symbol}"
+        params = {"period": "annual", "limit": 3, "apikey": api_key}
+        resp = _http_get(url, params=params, timeout=15)
+        data = resp.json()
+        if not data or isinstance(data, dict) and "Error" in data:
+            return None
+
+        income = []
+        for entry in data[:3]:
+            rev = entry.get("revenue", 0) or 0
+            ni = entry.get("netIncome", 0) or 0
+            eps = entry.get("eps", 0) or 0
+            gross_profit = entry.get("grossProfit", 0) or 0
+            income.append({
+                "报告期": entry.get("date", "")[:10], "报告类型": "年报",
+                "年份": entry.get("date", "")[:4],
+                "营业总收入": rev, "归母净利润": ni, "基本每股收益": eps,
+                "加权ROE": round(entry.get("roe", 0) or 0, 2),
+                "每股净资产": 0, "每股经营现金流": 0,
+                "营收同比": round(entry.get("revenueGrowth", 0) or 0, 2),
+                "净利同比": round(entry.get("netIncomeGrowth", 0) or 0, 2),
+            })
+
+        latest = income[0] if income else {}
+        rev_l = latest.get("营业总收入", 0)
+        ni_l = latest.get("归母净利润", 0)
+        gross_l = data[0].get("grossProfit", 0) if data else 0
+        return {"income": income, "balance": [], "quarterly": [],
+                "gross_margin": round(gross_l / rev_l * 100, 2) if rev_l and gross_l else None,
+                "net_margin": round(ni_l / rev_l * 100, 2) if rev_l and ni_l else None,
+                "_source": "fmp"}
+    except Exception as e:
+        print(f"[fmp] Failed: {e}", flush=True)
+        return None
+
+
+def _estimate_fundamentals_from_tencent(code, market):
+    """Guaranteed fallback: estimate ROE & metrics from Tencent PE/PB (always available).
+    ROE ≈ PB / PE × 100 — derived from: ROE = EPS/BVPS = (Price/PE)/(Price/PB) = PB/PE."""
+    try:
+        info = get_stock_info(code, market)
+        if not info or not info.get("最新价"):
+            return None
+        pe = info.get("市盈率-动态", 0) or 0
+        pb = info.get("市净率", 0) or 0
+        price = info.get("最新价", 0) or 0
+
+        # US PB fix: Tencent doesn't provide PB for US, try yfinance via subprocess (10s timeout)
+        if pb == 0 and market == "US":
+            try:
+                import subprocess as _sp, json as _j
+                ticker_yf = _fy_code(code, market)
+                pb_result = _sp.run(
+                    [sys.executable, "-c", f"import yfinance as yf; t=yf.Ticker('{ticker_yf}'); print(t.info.get('priceToBook', 0) or 0)"],
+                    capture_output=True, text=True, timeout=12
+                )
+                if pb_result.returncode == 0 and pb_result.stdout.strip():
+                    pb = float(pb_result.stdout.strip())
+            except Exception:
+                pass  # keep pb=0, will use sector default ROE
+
+        # Guard: need at minimum PE and price
+        if pe == 0 or price == 0:
+            return None
+        # PB may be 0 for US if yfinance also fails — use sector-default ROE
+        if pb == 0:
+            # Conservative sector defaults (科技15%, 金融10%, 其他12%)
+            roe_est = 15.0 if market == "US" else 12.0
+            bps_est = 0
+        else:
+            roe_est = round(pb / pe * 100, 2)
+            bps_est = round(price / pb, 2)
+
+        eps_est = round(price / pe, 2)
+
+        income = [{
+            "报告期": now_cn().strftime("%Y-%m-%d"), "报告类型": "年报",
+            "年份": str(now_cn().year),
+            "营业总收入": 0,  # cannot estimate
+            "归母净利润": 0,  # cannot estimate from PE/PB alone
+            "基本每股收益": eps_est,
+            "加权ROE": roe_est,
+            "每股净资产": bps_est,
+            "每股经营现金流": 0,
+            "营收同比": 0, "净利同比": 0,
+        }]
+        # Debt ratio estimation: from D/E ratio in info if available
+        dar = 0
+        if pe and pb and pe > 0 and pb > 0:
+            # Conservative: assume median D/E = 1.0 → DAR = 50%
+            dar = 50.0
+        balance = [{
+            "报告期": now_cn().strftime("%Y-%m-%d"), "报告类型": "年报",
+            "年份": str(now_cn().year),
+            "总资产": 0, "总负债": 0, "净资产": 0,
+            "资产负债率": round(dar, 2),
+        }]
+        print(f"[tencent_est] ROE={roe_est:.1f}% EPS={eps_est:.2f} BPS={bps_est:.2f} for {code}", flush=True)
+        return {
+            "income": income, "balance": balance, "quarterly": [],
+            "gross_margin": None, "net_margin": None,
+            "_source": "tencent_estimation",
+        }
+    except Exception as e:
+        print(f"[tencent_est] Failed: {e}", flush=True)
+        return None
+
+
+def _fetch_em_hk_us_financials(code, market):
+    """Primary: EastMoney global financial data via AKShare (no API key, always free).
+    Calls stock_financial_hk_analysis_indicator_em or stock_financial_us_analysis_indicator_em."""
+    try:
+        import akshare as ak
+        symbol = code.replace(".SZ", "").replace(".SH", "").replace(".BJ", "").replace(".HK", "").replace(".US", "")
+
+        if market == "HK":
+            df = ak.stock_financial_hk_analysis_indicator_em(symbol=symbol)
+        else:
+            df = ak.stock_financial_us_analysis_indicator_em(symbol=symbol)
+
+        if df is None or df.empty:
+            return None
+
+        # Filter annual reports only (DATE_TYPE_CODE "001")
+        if "DATE_TYPE_CODE" in df.columns:
+            df = df[df["DATE_TYPE_CODE"] == "001"]
+        if df.empty:
+            return None
+
+        # Field mapping — differs slightly between HK and US
+        if market == "HK":
+            rev_col = "OPERATE_INCOME"
+            ni_col = "HOLDER_PROFIT"
+            eps_col = "BASIC_EPS"
+            bps_col = "BPS"
+        else:
+            rev_col = "OPERATE_INCOME"
+            ni_col = "PARENT_HOLDER_NETPROFIT"
+            eps_col = "BASIC_EPS"
+            bps_col = None  # US doesn't have BPS in this dataset
+
+        income = []
+        for _, row in df.iterrows():
+            report_date = str(row.get("REPORT_DATE", "") or "")
+            rev = float(row.get(rev_col, 0) or 0)
+            ni = float(row.get(ni_col, 0) or 0)
+            eps = float(row.get(eps_col, 0) or 0)
+            bps = float(row.get(bps_col, 0) or 0) if bps_col else 0
+            roe = float(row.get("ROE_AVG", 0) or 0)
+            rev_yoy = float(row.get("OPERATE_INCOME_YOY", 0) or 0)
+            ni_yoy = float(row.get("HOLDER_PROFIT_YOY" if market == "HK" else "PARENT_HOLDER_NETPROFIT_YOY", 0) or 0)
+
+            income.append({
+                "报告期": report_date[:10] if report_date else "",
+                "报告类型": "年报",
+                "年份": report_date[:4] if report_date else "",
+                "营业总收入": rev,
+                "归母净利润": ni,
+                "基本每股收益": eps,
+                "加权ROE": round(roe, 2),
+                "每股净资产": round(bps, 2),
+                "每股经营现金流": 0,
+                "营收同比": round(rev_yoy, 2),
+                "净利同比": round(ni_yoy, 2),
+            })
+
+        # Gross/Net margin from latest
+        latest = income[0] if income else {}
+        gm = float(df.iloc[0].get("GROSS_PROFIT_RATIO", 0) or 0)
+        nm = float(df.iloc[0].get("NET_PROFIT_RATIO", 0) or 0)
+        dar = float(df.iloc[0].get("DEBT_ASSET_RATIO", 0) or 0)
+
+        # Balance sheet basic (debt ratio is enough for scoring)
+        balance = [{
+            "报告期": income[0]["报告期"] if income else "",
+            "报告类型": "年报",
+            "年份": income[0]["年份"] if income else "",
+            "总资产": 0, "总负债": 0, "净资产": 0,
+            "资产负债率": round(dar, 2),
+        }]
+
+        print(f"[akshare_em] OK for {code}: {len(income)} years, ROE={latest.get('加权ROE','?')}%, GM={gm}%", flush=True)
+        return {
+            "income": income, "balance": balance, "quarterly": [],
+            "gross_margin": round(gm, 2) if gm else None,
+            "net_margin": round(nm, 2) if nm else None,
+            "_source": "akshare_eastmoney",
+        }
+    except Exception as e:
+        print(f"[akshare_em] Failed for {code}: {e}", flush=True)
+        return None
+
+
+def get_financial_data(code, market="A"):
+    """Fetch financial statements. A-share: EastMoney direct. HK/US: AKShare(EastMoney) → Tencent estimation."""
+    if market in ("HK", "US"):
+        # L1: AKShare EastMoney global — real financial data, no API key needed
+        result = _fetch_em_hk_us_financials(code, market)
+        if result: return result
+
+        # L2: Tencent PE/PB estimation — 100% guaranteed, always instant
+        result = _estimate_fundamentals_from_tencent(code, market)
+        if result: return result
+        return {"income": [], "balance": [], "quarterly": [], "gross_margin": None, "net_margin": None, "_source": "empty"}
+
     symbol = code.replace(".SZ", "").replace(".SH", "").replace(".BJ", "")
     security_filter = f'(SECURITY_TYPE_CODE="058001001")(SECURITY_CODE="{symbol}")'
 
@@ -481,6 +1210,75 @@ def get_financial_data(code):
     }
 
 
+def _sina_money_flow(code):
+    """A-share money flow history via Sina (fallback for when EastMoney push2his is down).
+
+    Sina endpoint `MoneyFlow.ssl_qsfx_zjlrqs` returns multi-year daily history with:
+      - netamount = 主力净额 (元)
+      - r0_net    = 超大单净额 (元)
+    We derive 大单 ≈ 主力-超大单, 散户 ≈ -主力 (净额守恒近似). 新浪无中单拆分 -> 0.
+    Returns the same dict shape as get_money_flow, or None on failure.
+    """
+    try:
+        symbol = code.replace(".SZ", "").replace(".SH", "").replace(".BJ", "")
+        if code.endswith(".SH") or symbol.startswith(("6", "9")):
+            daima = f"sh{symbol}"
+        elif code.endswith(".BJ") or symbol.startswith(("4", "8")):
+            daima = f"bj{symbol}"
+        else:
+            daima = f"sz{symbol}"
+        url = ("http://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+               f"MoneyFlow.ssl_qsfx_zjlrqs?daima={daima}")
+        resp = _http_get(url, timeout=12)
+        rows = json.loads(resp.text)
+        if not rows or not isinstance(rows, list):
+            return None
+        # Sina returns newest-first; reverse to oldest-first (align with EastMoney klines).
+        rows = list(reversed(rows))
+        records = []
+        for r in rows:
+            try:
+                main = float(r.get("netamount") or 0)
+                r0 = float(r.get("r0_net") or 0)
+            except (TypeError, ValueError):
+                continue
+            records.append({
+                "date": r.get("opendate", ""),
+                "main_net": main,               # 主力净流入 (元)
+                "retail_net": -main,            # 散户 ≈ -主力 (净额守恒近似)
+                "medium_net": 0,                # 新浪无中单拆分
+                "large_net": main - r0,         # 大单 ≈ 主力 - 超大单
+                "super_large_net": r0,          # 超大单
+            })
+        if not records:
+            return None
+        recent = records[-20:]
+        last5 = recent[-5:] if len(recent) >= 5 else recent
+        result = {
+            "records": records[-60:],
+            "last5": last5,
+            "latest": recent[-1] if recent else None,
+            "summary": {
+                "main_5d_net": round(sum(x["main_net"] for x in last5) / 1e4, 2),
+                "super_large_5d_net": round(sum(x["super_large_net"] for x in last5) / 1e4, 2),
+                "large_5d_net": round(sum(x["large_net"] for x in last5) / 1e4, 2),
+                "medium_5d_net": 0,
+                "retail_5d_net": round(sum(x["retail_net"] for x in last5) / 1e4, 2),
+                "main_inflow_days": sum(1 for x in last5 if x["main_net"] > 0),
+                "main_outflow_days": sum(1 for x in last5 if x["main_net"] < 0),
+                "trend": "流入为主" if sum(1 for x in recent[-10:] if x["main_net"] > 0) >= 6
+                         else "流出为主" if sum(1 for x in recent[-10:] if x["main_net"] < 0) >= 6
+                         else "震荡平衡",
+            },
+            "source": "sina",
+            "note": "东方财富资金流暂不可用，已切换新浪历史资金流（无中单拆分）",
+        }
+        return result
+    except Exception as e:
+        print(f"[SINA] Money flow error for {code}: {e}")
+        return None
+
+
 def get_money_flow(code):
     """Daily capital flow via EastMoney fund flow API: main/super-large/large/medium/retail net flow."""
     cache_key = f"flow_{code}"
@@ -549,7 +1347,14 @@ def get_money_flow(code):
     except Exception as e:
         print(f"[PRIMARY] Money flow error for {code}: {e}")
 
-    # ---- Fallback: Graceful degradation ----
+    # ---- Fallback 1: Sina money flow history (multi-year daily) ----
+    sina = _sina_money_flow(code)
+    if sina and sina.get("records"):
+        print(f"[FALLBACK] Sina money flow -> OK: {len(sina['records'])} records for {code}")
+        cache_set(cache_key, sina)
+        return sina
+
+    # ---- Fallback 2: Graceful degradation ----
     fb_result = api_fallback.graceful_money_flow(code)
     cache_set(cache_key, fb_result)
     return fb_result
@@ -837,41 +1642,65 @@ def calc_bollinger(prices, window=20):
 
 
 def analyze_stock(code):
-    """Main analysis function - generates comprehensive report."""
-    # Clean code
+    """Main analysis function - generates comprehensive report. Supports A股/HK/US."""
+    # Clean code & detect market
     code = code.strip().upper()
-    if not code.endswith((".SZ", ".SH", ".BJ")):
-        if code.startswith(("6", "9")):
-            code = f"{code}.SH"
-        elif code.startswith(("0", "3")):
-            code = f"{code}.SZ"
-        elif code.startswith(("4", "8")):
-            code = f"{code}.BJ"
-        else:
-            return {"error": "无法识别股票代码，请输入如 000607.SZ 或 600968.SH 的格式"}
 
-    symbol = code.replace(".SZ", "").replace(".SH", "").replace(".BJ", "")
+    # ---- Market Detection ----
+    market, bare_code = detect_market(code)
+    cfg = MARKET_CONFIG.get(market, MARKET_CONFIG["A"])
+
+    # A-share auto-suffix
+    if market == "A" and not any(s in code for s in cfg["suffixes"]):
+        if bare_code.startswith(("6", "9")):
+            code = f"{bare_code}.SH"
+        elif bare_code.startswith(("0", "3")):
+            code = f"{bare_code}.SZ"
+        elif bare_code.startswith(("4", "8")):
+            code = f"{bare_code}.BJ"
+        else:
+            return {"error": f"无法识别股票代码: {code}。A股请输入如 000607.SZ；港股如 00700.HK；美股如 AAPL.US"}
+    elif market == "HK" and not code.endswith(".HK"):
+        code = f"{bare_code}.HK"
+    elif market == "US" and not code.endswith(".US"):
+        code = f"{bare_code}.US"
+
+    symbol = code.replace(".SZ", "").replace(".SH", "").replace(".BJ", "").replace(".HK", "").replace(".US", "")
 
     # ---- Init warnings list for fallback tracking ----
     warnings = []
 
-    # Fetch all data
-    info = get_stock_info(code)
-    financial = get_financial_data(code)
-    prices_data = get_price_history(code, days=250)
-    money_flow = get_money_flow(code)
-    news = get_news_events(code)
-    industry_data = get_industry_data(code)
+    # Fetch all data (market-aware)
+    info = get_stock_info(code, market)
+    financial = get_financial_data(code, market)
+    prices_data = get_price_history(code, days=250, market=market)
+    money_flow = get_money_flow(code) if market == "A" else _get_market_money_flow(code, market, prices_data)
+    news = get_news_events(code) if market == "A" else _get_market_news(code, market)
+    industry_data = get_industry_data(code) if market == "A" else _get_market_industry(code, market)
 
-    # Check for data fetch warnings
-    if not financial.get("income"):
-        warnings.append({"dim": "基本面", "msg": "利润表数据获取失败，基本面分析可能不完整"})
-    if money_flow.get("error"):
-        warnings.append({"dim": "资金面", "msg": money_flow["error"]})
-    if not news:
-        warnings.append({"dim": "事件催化", "msg": "新闻公告数据获取失败"})
-    if not industry_data.get("industry_name"):
-        warnings.append({"dim": "同业对标", "msg": "行业分类数据获取失败，同业对比可能不完整"})
+    # Adjust money_flow warning for non-A markets
+    _mfw = money_flow.get("error", "") if isinstance(money_flow, dict) else ""
+
+    # Check for data fetch warnings (adjusted per market)
+    if market == "A":
+        if not financial.get("income"):
+            warnings.append({"dim": "基本面", "msg": "利润表数据获取失败，基本面分析可能不完整"})
+        if money_flow.get("error"):
+            warnings.append({"dim": "资金面", "msg": money_flow["error"]})
+        if not news:
+            warnings.append({"dim": "事件催化", "msg": "新闻公告数据获取失败"})
+        if not industry_data.get("industry_name"):
+            warnings.append({"dim": "同业对标", "msg": "行业分类数据获取失败，同业对比可能不完整"})
+    else:
+        if not financial.get("income"):
+            warnings.append({"dim": "基本面", "msg": f"{cfg['name']}财报加载中，当前使用估值指标分析"})
+        if isinstance(money_flow, dict) and money_flow.get("error"):
+            warnings.append({"dim": "资金面", "msg": f"{cfg['name']}资金流：{money_flow['error']}"})
+        if not news:
+            pass  # HK/US news may legitimately return empty for now
+        if not industry_data.get("industry_name"):
+            pass  # Industry data not loaded for non-A markets yet
+
     if not prices_data:
         warnings.append({"dim": "技术面", "msg": "历史K线数据获取失败，技术分析不完整"})
 
@@ -889,6 +1718,10 @@ def analyze_stock(code):
     report = {
         "code": code,
         "symbol": symbol,
+        "market": market,
+        "market_name": cfg["name"],
+        "currency": cfg["currency"],
+        "currency_label": cfg["currency_label"],
         "name": info.get("股票简称", code),
         "price": price,
         "pe": pe,
@@ -1159,8 +1992,10 @@ def analyze_stock(code):
         flow_detail["main_5d_net"] = summary["main_5d_net"]
         flow_detail["super_large_5d_net"] = summary["super_large_5d_net"]
         flow_detail["large_5d_net"] = summary["large_5d_net"]
+        flow_detail["medium_5d_net"] = summary.get("medium_5d_net", 0)
         flow_detail["retail_5d_net"] = summary["retail_5d_net"]
         flow_detail["main_inflow_days"] = summary["main_inflow_days"]
+        flow_detail["main_outflow_days"] = summary.get("main_outflow_days", 0)
         flow_detail["trend"] = summary["trend"]
         flow_detail["records"] = money_flow.get("records", [])[-10:]  # last 10 days for chart
 
@@ -1288,7 +2123,8 @@ def analyze_stock(code):
         # PE-based industry assessment with industry-specific benchmarks
         # Different industries have different normal PE ranges
         ind_name = industry_data["industry_name"]
-        pe_range = _industry_pe_range(ind_name)
+        # Use international benchmarks for HK/US markets
+        pe_range = _industry_pe_range_intl(ind_name) if market in ("HK", "US") else _industry_pe_range(ind_name)
         ind_detail["pe_benchmark"] = pe_range
 
         if pe > 0:
@@ -1387,7 +2223,12 @@ def analyze_stock(code):
     else:
         value_detail["dividend_yield"] = 0
         if not dividends:
-            value_detail["dividend_note"] = "无分红记录"
+            if market == "US":
+                value_detail["dividend_note"] = "美股股息数据暂未覆盖（免费数据源限制，非代表无分红）"
+            elif market == "HK":
+                value_detail["dividend_note"] = "暂无分红记录"
+            else:
+                value_detail["dividend_note"] = "无分红记录"
         value_breakdown.append({"item": "股息率", "change": 0, "score_after": value_score, "detail": "无分红数据或每股分红为0"})
 
     # ---- 毛利率 (Gross Margin) & 净利率 (Net Margin) ----
@@ -1722,6 +2563,12 @@ def find_alternatives(code):
     if cached_val:
         return cached_val
 
+    market, symbol = detect_market(code)
+    if market in ("HK", "US"):
+        res = _hk_us_same_industry(code, market, symbol)
+        cache_set(cache_key, res)
+        return res
+
     try:
         symbol = code.replace('.SZ', '').replace('.SH', '').replace('.BJ', '')
 
@@ -2012,6 +2859,276 @@ def _lightweight_score(candidate, context=None):
     }
 
 
+# ========== HK / US Alternatives Support ==========
+def _to_float(v, default=0.0):
+    try:
+        if v is None:
+            return default
+        if isinstance(v, str):
+            v = v.strip().replace(",", "").replace("%", "")
+            if v in ("", "-", "--", "None", "null"):
+                return default
+        f = float(v)
+        if f != f:  # NaN
+            return default
+        return f
+    except Exception:
+        return default
+
+
+# Coarse sector mapping for HK/US (real industry names + name keywords)
+_SECTOR_MAP = {
+    "银行": "银行", "保险": "保险", "证券": "非银金融", "信托": "非银金融",
+    "软件": "科技", "软件服务": "科技", "互联网": "互联网", "科技": "科技",
+    "半导体": "科技", "电子": "科技", "计算机": "科技", "通讯": "通讯", "通信": "通讯",
+    "汽车": "汽车", "新能源": "汽车", "电池": "汽车", "电动车": "汽车",
+    "医药": "医药", "生物": "医药", "医疗": "医药", "健康": "医药", "制药": "医药",
+    "地产": "地产", "房地产": "地产", "置业": "地产",
+    "能源": "能源", "石油": "能源", "煤炭": "能源", "电力": "能源", "燃气": "能源", "煤气": "能源",
+    "消费": "消费", "零售": "消费", "食品": "消费", "饮料": "消费", "白酒": "消费", "家电": "消费",
+    "传媒": "传媒", "教育": "传媒", "旅游": "消费", "航空": "消费", "物流": "消费",
+    "化工": "材料", "材料": "材料", "金属": "材料", "钢铁": "材料", "有色金属": "材料",
+    "机械": "工业", "工业": "工业", "军工": "工业", "建筑": "工业", "工程": "工业",
+    "农业": "农业",
+}
+
+
+def _coarse_sector(industry_name="", name=""):
+    text = industry_name or ""
+    for k, v in _SECTOR_MAP.items():
+        if k in text:
+            return v
+    nm = name or ""
+    for kw, sec in [
+        ("银行", "银行"), ("保险", "保险"), ("证券", "非银金融"),
+        ("科技", "科技"), ("芯片", "科技"), ("半导体", "科技"), ("电子", "科技"),
+        ("软件", "科技"), ("互联网", "互联网"),
+        ("腾讯", "互联网"), ("阿里", "互联网"), ("京东", "互联网"), ("美团", "互联网"),
+        ("快手", "互联网"), ("网易", "互联网"), ("百度", "互联网"), ("拼多多", "互联网"),
+        ("携程", "互联网"), ("小米", "科技"), ("苹果", "科技"), ("微软", "科技"),
+        ("谷歌", "科技"), ("英伟达", "科技"), ("英伟", "科技"), ("特斯拉", "汽车"),
+        ("亚马逊", "互联网"), ("脸书", "科技"), ("Meta", "科技"), ("英特尔", "科技"),
+        ("高通", "科技"), ("美光", "科技"), ("AMD", "科技"), ("超威", "科技"),
+        ("台积", "科技"), ("博通", "科技"), ("奈飞", "传媒"), ("迪士尼", "传媒"),
+        ("汽车", "汽车"), ("新能源", "汽车"), ("电池", "汽车"), ("电动", "汽车"),
+        ("比亚迪", "汽车"), ("蔚来", "汽车"), ("小鹏", "汽车"), ("理想", "汽车"),
+        ("医药", "医药"), ("生物", "医药"), ("医疗", "医药"), ("健康", "医药"),
+        ("制药", "医药"), ("辉瑞", "医药"), ("强生", "医药"), ("默沙东", "医药"),
+        ("礼来", "医药"), ("罗氏", "医药"), ("诺和", "医药"),
+        ("地产", "地产"), ("置业", "地产"), ("发展", "地产"), ("恒隆", "地产"),
+        ("能源", "能源"), ("石油", "能源"), ("煤炭", "能源"), ("电力", "能源"),
+        ("燃气", "能源"), ("煤气", "能源"), ("埃克森", "能源"), ("雪佛龙", "能源"),
+        ("消费", "消费"), ("零售", "消费"), ("食品", "消费"), ("饮料", "消费"),
+        ("酒", "消费"), ("家电", "消费"), ("沃尔玛", "消费"), ("宝洁", "消费"),
+        ("可口", "消费"), ("星巴克", "消费"), ("麦当劳", "消费"), ("耐克", "消费"),
+        ("通讯", "通讯"), ("电信", "通讯"), ("移动", "通讯"), ("联通", "通讯"),
+        ("传媒", "传媒"), ("教育", "传媒"),
+        ("材料", "材料"), ("化工", "材料"), ("金属", "材料"), ("钢铁", "材料"),
+        ("机械", "工业"), ("军工", "工业"), ("建筑", "工业"), ("工程", "工业"),
+        ("农业", "农业"), ("农", "农业"),
+        ("摩根", "非银金融"), ("花旗", "非银金融"), ("高盛", "非银金融"),
+        ("富国", "非银金融"), ("贝莱德", "非银金融"),
+        # English-name keywords (curated US list uses English names)
+        ("Apple", "科技"), ("Microsoft", "科技"), ("Alphabet", "科技"), ("Google", "科技"),
+        ("Amazon", "互联网"), ("NVIDIA", "科技"), ("Nvidia", "科技"), ("Meta", "科技"),
+        ("Tesla", "汽车"), ("AMD", "科技"), ("Intel", "科技"), ("Qualcomm", "科技"),
+        ("Micron", "科技"), ("Broadcom", "科技"), ("Netflix", "传媒"), ("Disney", "传媒"),
+        ("Berkshire", "其他"), ("JPMorgan", "非银金融"), ("AT&T", "通讯"), ("Verizon", "通讯"),
+        ("Walmart", "消费"), ("P&G", "消费"), ("Coca", "消费"), ("Starbucks", "消费"),
+        ("Pfizer", "医药"), ("Johnson", "医药"), ("Merck", "医药"), ("Exxon", "能源"),
+        ("Chevron", "能源"), ("Caterpillar", "工业"), ("Boeing", "工业"), ("IBM", "科技"),
+        ("Oracle", "科技"), ("Salesforce", "科技"), ("Adobe", "科技"), ("PayPal", "互联网"),
+        ("Uber", "互联网"), ("Airbnb", "互联网"), ("Visa", "非银金融"), ("Mastercard", "非银金融"),
+        ("Bank", "银行"), ("Goldman", "非银金融"), ("Morgan", "非银金融"),
+        ("Citigroup", "非银金融"), ("Wells", "银行"), ("Applied", "科技"), ("Texas", "科技"),
+        ("Lam", "科技"), ("TSMC", "科技"), ("Taiwan", "科技"), ("ASML", "科技"),
+        ("Nike", "消费"), ("McDonald", "消费"), ("Procter", "消费"), ("Pepsi", "消费"),
+        ("Advanced", "科技"), ("Netflix", "传媒"), ("Comcast", "传媒"), ("Fox", "传媒"),
+        ("Union", "工业"), ("Home", "消费"), ("Lowe", "消费"), ("Target", "消费"),
+        ("Costco", "消费"), ("AbbVie", "医药"), ("Abbott", "医药"), ("Amgen", "医药"),
+        ("Gilead", "医药"), ("Moderna", "医药"), ("Novartis", "医药"), ("Roche", "医药"),
+        ("Bristol", "医药"), ("CVS", "消费"), ("Walgreens", "消费"), ("Conoco", "能源"),
+        ("Marathon", "能源"), ("Phillips", "能源"), ("Schlumberger", "能源"),
+        ("Halliburton", "能源"), ("Deere", "工业"), ("Lockheed", "工业"),
+        ("General Electric", "工业"), ("Honeywell", "工业"), ("Ford", "汽车"),
+        ("General Motors", "汽车"), ("Toyota", "汽车"), ("Honda", "汽车"),
+        ("NIO", "汽车"), ("XPeng", "汽车"), ("Li Auto", "汽车"), ("Rivian", "汽车"),
+        ("Lucid", "汽车"), ("BYD", "汽车"), ("Intel", "科技"),
+    ]:
+        if kw in nm:
+            return sec
+    return "其他"
+
+
+def _batch_get_quotes_trusted(wc_codes):
+    """Batch Tencent quotes via trust_env=False session (bypasses proxy).
+    Plain requests.get (used by _batch_get_quotes) fails HK/US batches through
+    the local proxy, so HK/US uses this instead. Keys match _batch_get_quotes."""
+    result = {}
+    if not wc_codes:
+        return result
+    TENCENT_QT = "https://qt.gtimg.cn/q="
+    batch_size = 40
+    for i in range(0, len(wc_codes), batch_size):
+        batch = wc_codes[i:i + batch_size]
+        q = ",".join(batch)
+        try:
+            resp = _http_session.get(TENCENT_QT + q, headers=REQ_HEADERS, timeout=15)
+            if resp.status_code != 200:
+                continue
+            for line in resp.text.strip().split("\n"):
+                if "=" not in line:
+                    continue
+                var_name = line.split("=")[0].strip()
+                wc = var_name[2:] if var_name.startswith("v_") else var_name
+                body = line.split("=", 1)[1].strip().strip('"')
+                f = body.split("~")
+                if len(f) < 30:
+                    continue
+                try:
+                    result[wc] = {
+                        "name": f[1],
+                        "price": _to_float(f[3]),
+                        "pe": _to_float(f[39]),
+                        "pb": f[46],   # string (english name) for HK/US -> coerced to 0 later
+                        "change_pct": _to_float(f[32]),
+                        # Tencent f[45] is market cap in 亿 (e.g. 腾讯=41607). A-share
+                        # path multiplies by 1e8 to get 元; do the same here so the
+                        # frontend's `/1e8 -> 亿` and the mcap scoring stay consistent.
+                        "mcap": _to_float(f[45]) * 1e8 if f[45] else 0,
+                    }
+                except Exception:
+                    continue
+        except Exception as e:
+            print(f"[_batch_get_quotes_trusted] batch error: {e}")
+            continue
+    return result
+
+
+def _get_hk_us_pool(market):
+    """Live-priced candidate pool for HK/US from the curated list."""
+    try:
+        from hk_us_list import HK_US_STOCKS
+    except Exception:
+        return []
+    base = HK_US_STOCKS.get(market, [])
+    if not base:
+        return []
+    wcs = [f"hk{c}" if market == "HK" else f"us{c.upper()}" for c, _ in base]
+    quotes = _batch_get_quotes_trusted(wcs)
+    pool = []
+    for code, name in base:
+        wc = f"hk{code}" if market == "HK" else f"us{code.upper()}"
+        q = quotes.get(wc, {}) or {}
+        pb_raw = q.get("pb")
+        pb = _to_float(pb_raw) if isinstance(pb_raw, (int, float)) else 0.0
+        pool.append({
+            "code": code,
+            "name": name,
+            "wc": wc,
+            "code_full": (code + ".HK") if market == "HK" else (code.upper() + ".US"),
+            "sector": _coarse_sector(name=name),
+            "price": _to_float(q.get("price")),
+            "pe": _to_float(q.get("pe")),
+            "pb": pb,
+            "change": _to_float(q.get("change_pct")),
+            "market_cap": _to_float(q.get("mcap")),
+        })
+    return pool
+
+
+def _hk_us_price_similar(code, market, symbol):
+    wc = f"hk{symbol}" if market == "HK" else f"us{symbol.upper()}"
+    q = _batch_get_quotes_trusted([wc]).get(wc, {}) or {}
+    price = _to_float(q.get("price"))
+    if price <= 0:
+        return []
+    pool = _get_hk_us_pool(market)
+    lo, hi = price * 0.75, price * 1.25
+    in_range = [p for p in pool if p["code"] != symbol and p["price"] > 0 and lo <= p["price"] <= hi]
+    if len(in_range) < 4:
+        others = [p for p in pool if p["code"] != symbol and p["price"] > 0]
+        others.sort(key=lambda x: abs(x["price"] - price))
+        seen = {p["code"] for p in in_range}
+        for p in others:
+            if p["code"] not in seen:
+                in_range.append(p)
+                seen.add(p["code"])
+            if len(in_range) >= 4:
+                break
+    for c in in_range:
+        sr = _lightweight_score(c, context={"primary_price": price})
+        c["total_score"] = sr["total_score"]
+        c["recommendation"] = sr["recommendation"]
+        c["scores_breakdown"] = sr["breakdown"]
+    in_range.sort(key=lambda x: x["total_score"], reverse=True)
+    return in_range[:4]
+
+
+def _hk_us_recommended(code, market, symbol):
+    pool = _get_hk_us_pool(market)
+    primary = next((p for p in pool if p["code"] == symbol), None)
+    prim_sector = primary["sector"] if primary else "其他"
+    cands = [p for p in pool if p["code"] != symbol and p["price"] > 0]
+    for c in cands:
+        sr = _lightweight_score(c)
+        c["total_score"] = sr["total_score"]
+        c["recommendation"] = sr["recommendation"]
+        c["scores_breakdown"] = sr["breakdown"]
+        if c["sector"] == prim_sector:
+            c["total_score"] -= 8  # diversify away from same sector
+    cands.sort(key=lambda x: x["total_score"], reverse=True)
+    return cands[:4]
+
+
+def _hk_us_same_industry(code, market, symbol):
+    try:
+        ind = _get_market_industry(code, market)
+        ind_name = (ind.get("industry_name", "") or "")
+    except Exception:
+        ind_name = ""
+    # Primary company name: prefer the curated list (always available, no network
+    # call), fall back to get_stock_info only if the list lookup misses.
+    primary_name = ""
+    try:
+        from hk_us_list import HK_US_STOCKS
+        for c, n in HK_US_STOCKS.get(market, []):
+            if c == symbol:
+                primary_name = n
+                break
+    except Exception:
+        pass
+    if not primary_name:
+        try:
+            primary_name = get_stock_info(code, market).get("name", "") or ""
+        except Exception:
+            pass
+    pool = _get_hk_us_pool(market)
+    # The pool assigns each stock a sector from its NAME only (see _get_hk_us_pool).
+    # The primary's industry_name (e.g. 阿里 "专业零售"->消费) can diverge from its
+    # name-based sector (阿里 "互联网"), causing a mismatch. Try the industry_name-
+    # derived sector first, then the name-derived one so we align with the pool.
+    # Never use the catch-all "其他" as a match sector (it would match the whole
+    # pool and defeat the purpose).
+    cand_sectors = []
+    for s in (_coarse_sector(ind_name, ""), _coarse_sector("", primary_name)):
+        if s and s != "其他" and s not in cand_sectors:
+            cand_sectors.append(s)
+    peers = []
+    for sec in cand_sectors:
+        peers = [p for p in pool if p["code"] != symbol and p["sector"] == sec and p["price"] > 0]
+        if len(peers) >= 3:
+            break
+    if len(peers) < 3:
+        # Generic fallback: lowest-PE liquid names across the market (not pool order)
+        peers = sorted(
+            [p for p in pool if p["code"] != symbol and p["price"] > 0],
+            key=lambda x: x["pe"] if x["pe"] > 0 else 999,
+        )[:12]
+    peers.sort(key=lambda x: x["pe"] if x["pe"] > 0 else 999)
+    return peers[:6]
+
+
 def find_price_similar(code):
     """
     Find stocks with similar price range (±25%).
@@ -2024,6 +3141,12 @@ def find_price_similar(code):
     cached_val = cached(cache_key, ttl=600)
     if cached_val:
         return cached_val
+
+    market, symbol = detect_market(code)
+    if market in ("HK", "US"):
+        res = _hk_us_price_similar(code, market, symbol)
+        cache_set(cache_key, res)
+        return res
 
     try:
         # Get primary stock price
@@ -2142,7 +3265,13 @@ def find_recommended(code):
     cached_val = cached(cache_key, ttl=600)
     if cached_val:
         return cached_val
-    
+
+    market, symbol = detect_market(code)
+    if market in ("HK", "US"):
+        res = _hk_us_recommended(code, market, symbol)
+        cache_set(cache_key, res)
+        return res
+
     try:
         symbol = code.replace('.SZ', '').replace('.SH', '').replace('.BJ', '')
         
@@ -2800,7 +3929,8 @@ def timing_analysis():
     chat_cfg = get_ai_config()
 
     # Fetch market index data for richer context
-    index_data = _get_market_indices()
+    mkt = stock_data.get("market", "A")
+    index_data = _get_market_indices(mkt)
 
     if not chat_cfg.get("api_key") or chat_cfg["api_key"].startswith("sk-your"):
         # Rule-based fallback (now much more comprehensive)
@@ -3379,19 +4509,15 @@ def _rule_based_timing(stock_data):
     return "\n".join(parts)
 
 
-def _get_market_indices():
-    """Fetch major market index data via Tencent real-time API."""
-    cache_key = "market_indices"
+def _get_market_indices(market="A"):
+    """Fetch major market index data via Tencent real-time API (A/HK/US)."""
+    cfg = MARKET_CONFIG.get(market, MARKET_CONFIG["A"])
+    cache_key = f"market_indices_{market}"
     cached_val = cached(cache_key, ttl=120)  # 2-minute cache
     if cached_val:
         return cached_val
 
-    indices = {
-        "shanghai": ("sh000001", "上证指数"),
-        "shenzhen": ("sz399001", "深证成指"),
-        "chinext": ("sz399006", "创业板指"),
-    }
-
+    indices = cfg["indices"]
     result = {}
     for key, (tcode, name) in indices.items():
         try:
@@ -3418,14 +4544,11 @@ def _get_market_indices():
         except Exception as e:
             print(f"Error fetching index {name}: {e}")
 
-    cache_set(cache_key, result)
-
-    # ---- Fallback: Sina indices ----
-    if not result or len(result) < 2:
+    # ---- Fallback: Sina indices (A-share only) ----
+    if market == "A" and (not result or len(result) < 2):
         try:
             fb_result = api_fallback.sina_get_market_indices()
             if fb_result:
-                # Merge Sina data into missing keys
                 for key, val in fb_result.items():
                     if key not in result:
                         result[key] = val
@@ -3434,6 +4557,508 @@ def _get_market_indices():
 
     cache_set(cache_key, result)
     return result
+
+
+# ========== Cross-Market Fallback Helpers (Beta) ==========
+def _compute_volume_flow(prices_data, info=None):
+    """Volume-price divergence analysis — market-agnostic money flow proxy.
+    Computes: volume trend, price-volume correlation, net pressure score.
+    Returns A-share-compatible money flow dict."""
+    if not prices_data or len(prices_data) < 5:
+        return {
+            "records": [], "last5": [], "latest": None,
+            "summary": {"main_5d_net": 0, "super_large_5d_net": 0, "large_5d_net": 0,
+                         "retail_5d_net": 0, "main_inflow_days": 0, "main_outflow_days": 0,
+                         "trend": "数据不足"},
+            "note": "数据不足，无法进行量价分析"
+        }
+
+    # Last 20 trading days
+    recent = prices_data[-20:] if len(prices_data) >= 20 else prices_data
+    records = []
+    for d in recent:
+        close = d.get("收盘", 0) or 0
+        vol = d.get("成交量", 0) or 0
+        records.append({"date": d.get("日期", ""), "close": close, "volume": vol})
+
+    # Compute simple metrics
+    vols = [r["volume"] for r in records]
+    closes = [r["close"] for r in records]
+    avg_vol = sum(vols) / len(vols) if vols else 1
+
+    # 5-day slice
+    last5 = records[-5:] if len(records) >= 5 else records
+    last5_vols = [r["volume"] for r in last5]
+    last5_closes = [r["close"] for r in last5]
+
+    # Volume trend: rising volume on up days = buying pressure; rising volume on down days = selling pressure
+    up_vol = 0
+    down_vol = 0
+    for i in range(1, len(last5)):
+        if last5_closes[i] > last5_closes[i-1]:
+            up_vol += last5_vols[i]
+        elif last5_closes[i] < last5_closes[i-1]:
+            down_vol += last5_vols[i]
+
+    # Net flow score: normalized to similar range as A-share main_net (万元)
+    total_vol_5d = sum(last5_vols)
+    if total_vol_5d > 0:
+        net_pressure = (up_vol - down_vol) / total_vol_5d * 10000  # scale to ~万元
+    else:
+        net_pressure = 0
+
+    # Trend determination
+    if up_vol > down_vol * 1.5:
+        trend = "量价配合 — 放量上涨为主"
+    elif down_vol > up_vol * 1.5:
+        trend = "量价背离 — 放量下跌为主"
+    elif up_vol > down_vol:
+        trend = "量能偏多 — 买入量略大"
+    elif down_vol > up_vol:
+        trend = "量能偏空 — 卖出量略大"
+    else:
+        trend = "量能均衡"
+
+    # Volume vs average
+    avg_5d_vol = sum(last5_vols) / len(last5_vols) if last5_vols else 0
+    vol_ratio = avg_5d_vol / avg_vol if avg_vol else 1
+    vol_note = "放量" if vol_ratio > 1.3 else "缩量" if vol_ratio < 0.7 else "正常"
+
+    # Build flow records — distribute net_pressure across days proportionally
+    # A-share format: daily main_net in 元, main_5d_net in 万元 (= sum_daily / 10000)
+    flow_records = []
+    # Compute daily contributions: volume * direction for each day
+    daily_contribs = []
+    for i in range(1, len(last5)):
+        if last5_closes[i] > last5_closes[i-1]:
+            daily_contribs.append(last5_vols[i])  # up day → buying
+        elif last5_closes[i] < last5_closes[i-1]:
+            daily_contribs.append(-last5_vols[i])  # down day → selling
+        else:
+            daily_contribs.append(0)
+    total_contrib = sum(abs(c) for c in daily_contribs) or 1
+
+    # net_pressure is a score in ~万元; scale to 元 for daily records
+    daily_total_yuan = 0.0
+    for i, r in enumerate(last5):
+        if i == 0:
+            main_net = 0.0
+        else:
+            # Scale: proportion * net_pressure_score * 10000 (万元→元)
+            main_net = round(daily_contribs[i-1] / total_contrib * net_pressure * 10000, 0)
+        daily_total_yuan += main_net
+        flow_records.append({
+            "date": r["date"],
+            "main_net": main_net,
+            "retail_net": 0, "medium_net": 0, "large_net": 0, "super_large_net": 0,
+        })
+
+    # main_5d_net in 万元 (A-share convention: daily sum / 10000)
+    main_5d_wan = round(daily_total_yuan / 10000, 2)
+
+    result = {
+        "records": flow_records,
+        "last5": flow_records,
+        "latest": flow_records[-1] if flow_records else None,
+        "summary": {
+            "main_5d_net": main_5d_wan,
+            "super_large_5d_net": 0,
+            "large_5d_net": 0,
+            "retail_5d_net": 0,
+            "main_inflow_days": sum(1 for i in range(1, len(last5)) if last5_closes[i] > last5_closes[i-1]),
+            "main_outflow_days": sum(1 for i in range(1, len(last5)) if last5_closes[i] < last5_closes[i-1]),
+            "trend": f"{trend} ({vol_note})",
+        },
+        "note": "量价分析（基于成交量和价格方向估算资金流向）"
+    }
+    return result
+
+
+def _get_em_money_flow(code, market):
+    """EastMoney 分笔资金流 (fflow) for HK (116.xxxxx) / US (105.TICKER).
+    Returns real daily 主力/超大单/大单/中单/小单 net inflow (元).
+    Falls back to None if the API yields no data."""
+    if market == "HK":
+        em_symbol = code.replace(".HK", "").zfill(5)
+        secid = f"116.{em_symbol}"
+    elif market == "US":
+        em_symbol = code.replace(".US", "").replace(".OQ", "").replace(".N", "")
+        secid = f"105.{em_symbol}"
+    else:
+        return None
+
+    url = "http://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get"
+    params = {
+        "lmt": "10", "klt": "101", "secid": secid,
+        "fields1": "f1,f2,f3,f7",
+        "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65",
+    }
+    try:
+        r = _http_get(url, params=params, timeout=10)
+        j = r.json()
+        d = j.get("data")
+        if not d or not d.get("klines"):
+            return None
+        records = []
+        for line in d["klines"][-10:]:
+            p = line.split(",")
+            if len(p) < 6:
+                continue
+            def _f(i):
+                try:
+                    return float(p[i])
+                except Exception:
+                    return 0.0
+            records.append({
+                "date": p[0],
+                "main_net": _f(1),
+                "retail_net": _f(2),
+                "medium_net": _f(3),
+                "large_net": _f(4),
+                "super_large_net": _f(5),
+            })
+        if not records:
+            return None
+
+        last5 = records[-5:]
+        def _sum5d(key):
+            return round(sum(r.get(key, 0) for r in last5) / 1e4, 2)
+        main_5d = _sum5d("main_net")
+        super_5d = _sum5d("super_large_net")
+        large_5d = _sum5d("large_net")
+        medium_5d = _sum5d("medium_net")
+        retail_5d = _sum5d("retail_net")
+
+        inflow_days = sum(1 for r in last5 if r["main_net"] > 0)
+        outflow_days = sum(1 for r in last5 if r["main_net"] < 0)
+
+        if main_5d > 0 and (super_5d + large_5d) > 0:
+            trend = "主力与机构资金净流入（偏多）"
+        elif main_5d > 0:
+            trend = "主力资金净流入（偏多）"
+        elif main_5d < 0 and (super_5d + large_5d) < 0:
+            trend = "主力与机构资金净流出（偏空）"
+        elif main_5d < 0:
+            trend = "主力资金净流出（偏空）"
+        else:
+            trend = "主力资金多空均衡"
+
+        return {
+            "records": records,
+            "last5": last5,
+            "latest": records[-1],
+            "summary": {
+                "main_5d_net": main_5d,
+                "super_large_5d_net": super_5d,
+                "large_5d_net": large_5d,
+                "medium_5d_net": medium_5d,
+                "retail_5d_net": retail_5d,
+                "main_inflow_days": inflow_days,
+                "main_outflow_days": outflow_days,
+                "trend": trend,
+            },
+            "note": "东方财富分笔资金流（主力/超大单/大单/中单/小单，单位：万元）",
+            "source": "eastmoney_fflow",
+        }
+    except Exception as e:
+        print(f"[_get_em_money_flow] {code} ({market}) failed: {e}")
+        return None
+
+
+def _get_market_money_flow(code, market, prices_data=None):
+    """Money flow for HK/US: volume-price divergence analysis.
+    Also attempts HK southbound flow for HK market."""
+    cfg = MARKET_CONFIG.get(market, {})
+    symbol = code.replace(".SZ", "").replace(".SH", "").replace(".BJ", "").replace(".HK", "").replace(".US", "")
+
+    # ---- Primary: EastMoney fflow (real 主力/超大单/大单/中单/小单) ----
+    em_flow = _get_em_money_flow(code, market)
+    if em_flow and em_flow.get("records"):
+        em_flow["note"] = f"{cfg.get('name','')}东方财富资金流（真实分笔数据）"
+        return em_flow
+
+    # ---- Fallback: volume-price divergence analysis ----
+    if prices_data and len(prices_data) >= 5:
+        result = _compute_volume_flow(prices_data)
+    else:
+        # No price data — fallback to basic quote info
+        try:
+            tc = _tencent_code(code, market)
+            resp = _http_get(f"{TENCENT_QT}{tc}")
+            text = resp.text
+            if "v_" in text and len(text) >= 10:
+                start = text.index('"') + 1
+                end = text.rindex('"')
+                fields = text[start:end].split("~")
+                vol = int(float(fields[6])) if len(fields) > 6 and fields[6] else 0
+                amount = float(fields[37]) if len(fields) > 37 and fields[37] else 0
+                result = {
+                    "records": [], "last5": [],
+                    "latest": {"date": now_cn().strftime("%Y-%m-%d"), "main_net": 0},
+                    "summary": {"main_5d_net": 0, "super_large_5d_net": 0, "large_5d_net": 0,
+                                 "retail_5d_net": 0, "main_inflow_days": 0, "main_outflow_days": 0,
+                                 "trend": f"当日成交: {vol}手, {amount:.0f}万{cfg['currency_label']}"},
+                    "note": "仅有当日数据，历史K线不足无法量价分析"
+                }
+            else:
+                raise ValueError("No quote data")
+        except Exception:
+            result = {"error": "资金流数据不可用", "records": [], "note": "历史K线数据不足"}
+
+    # ---- HK: try southbound flow enhancement ----
+    if market == "HK":
+        try:
+            # EastMoney southbound flow: secid for 00700 is 116.xxxxx
+            em_symbol = symbol  # keep full code: 00700, 09988 etc. (EastMoney southbound uses full format)
+            flow_url = "http://push2.eastmoney.com/api/qt/stock/fflow/daykline/get"
+            params = {"lmt": "5", "klt": "1", "secid": f"116.{em_symbol}",
+                      "fields1": "f1,f2,f3,f7",
+                      "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65"}
+            flow_resp = _http_get(flow_url, params=params, timeout=10)
+            flow_data = flow_resp.json()
+            if flow_data.get("data") and flow_data["data"].get("klines"):
+                # Successfully got eastmoney flow data for HK
+                klines = flow_data["data"]["klines"]
+                records = []
+                for line in klines[-5:]:
+                    parts = line.split(",")
+                    if len(parts) >= 7:
+                        records.append({
+                            "date": parts[0],
+                            "main_net": float(parts[1]) if parts[1] != "-" else 0,
+                            "retail_net": float(parts[2]) if parts[2] != "-" else 0,
+                            "medium_net": float(parts[3]) if parts[3] != "-" else 0,
+                            "large_net": float(parts[4]) if parts[4] != "-" else 0,
+                            "super_large_net": float(parts[5]) if parts[5] != "-" else 0,
+                        })
+                if records:
+                    # Enrich summary with real southbound data, keep volume analysis records
+                    result["summary"]["super_large_5d_net"] = round(sum(r["super_large_net"] for r in records) / 1e4, 2)
+                    result["summary"]["large_5d_net"] = round(sum(r.get("large_net", 0) for r in records) / 1e4, 2)
+                    retail_sum = sum(r.get("retail_net", 0) for r in records)
+                    if retail_sum != 0:
+                        result["summary"]["retail_5d_net"] = round(retail_sum / 1e4, 2)
+                    result["note"] = "港股通资金流 (东方财富) 增强 + 量价分析"
+        except Exception as e:
+            pass  # EM flow failed, keep volume analysis result
+
+    return result
+
+
+def _get_market_news(code, market):
+    """News/events for HK/US: EastMoney news via AKShare (free, no key)."""
+    cfg = MARKET_CONFIG.get(market, {})
+    symbol = code.replace(".SZ", "").replace(".SH", "").replace(".BJ", "").replace(".HK", "").replace(".US", "")
+    try:
+        import akshare as ak
+        ak_symbol = f"{symbol}.HK" if market == "HK" else symbol
+        df = ak.stock_news_em(symbol=ak_symbol)
+        if df is None or df.empty:
+            return []
+
+        # Sentiment keyword library (shared with A-share scoring)
+        positive_kw = [
+            ("大涨", 5), ("增持", 3), ("回购", 3), ("超预期", 3), ("利好", 3), ("中标", 3),
+            ("合作", 2), ("突破", 3), ("获批", 3), ("增长", 2), ("创新高", 3), ("净流入", 2),
+            ("买入评级", 3), ("上调目标价", 3), ("收购", 2), ("分红", 2), ("派息", 2), ("业绩预增", 4),
+            ("扭亏", 4), ("扭亏为盈", 4), ("盈利", 1), ("收益", 1), ("上升", 1), ("反弹", 2),
+            ("战略合作", 3), ("签署协议", 2), ("获得订单", 3), ("产能扩张", 2), ("产品获批", 3),
+            ("政策利好", 3), ("补贴", 2), ("研发突破", 3), ("专利", 2),
+            ("机构增持", 3), ("外资流入", 2), ("南下资金", 2),
+            ("ETF纳入", 2), ("指数纳入", 2),
+        ]
+        negative_kw = [
+            ("大跌", 5), ("减持", 3), ("亏损", 4), ("暴雷", 5), ("处罚", 4), ("罚款", 3),
+            ("立案调查", 5), ("退市", 5), ("违约", 5), ("诉讼", 3), ("仲裁", 3),
+            ("业绩预亏", 4), ("下滑", 2), ("不及预期", 3), ("下调目标价", 3), ("卖出评级", 3),
+            ("监管", 3), ("停牌", 3), ("重组失败", 4), ("终止", 3),
+            ("裁员", 2), ("关闭", 2), ("召回", 3), ("事故", 4),
+        ]
+
+        events = []
+        for _, row in df.head(15).iterrows():
+            title = row.get("新闻标题", "") or ""
+            pub_time = str(row.get("发布时间", "") or "")[:10]
+            source = row.get("文章来源", "") or ""
+            url = row.get("新闻链接", "") or ""
+
+            # Sentiment analysis — net-based (correct: keep positive AND
+            # negative weights, label by the dominant side).
+            pos_score = 0
+            neg_score = 0
+            for kw, w in positive_kw:
+                if kw in title:
+                    pos_score += w
+            for kw, w in negative_kw:
+                if kw in title:
+                    neg_score += w
+            if pos_score > neg_score:
+                sent = "positive"
+                sent_score = min(pos_score - neg_score, 5)
+            elif neg_score > pos_score:
+                sent = "negative"
+                sent_score = min(neg_score - pos_score, 5)
+            else:
+                sent = "neutral"
+                sent_score = 0
+
+            events.append({
+                "date": pub_time, "title": title, "type": source or "新闻",
+                "url": url, "sentiment": sent, "sentiment_score": sent_score,
+            })
+
+        return events
+    except Exception as e:
+        print(f"[news] Failed for {code}: {e}", flush=True)
+        return []
+
+
+def _get_market_industry(code, market):
+    """Industry/peers/dividends for HK/US via AKShare (free, no key)."""
+    cfg = MARKET_CONFIG.get(market, {})
+    result = {
+        "industry_name": "", "board_name": "", "board_code": "",
+        "dividends": [],
+        "latest_dividend": {"date": "", "cash_per_share": 0, "dividend_ratio": 0},
+    }
+    symbol = code.replace(".SZ", "").replace(".SH", "").replace(".BJ", "").replace(".HK", "").replace(".US", "")
+
+    try:
+        import akshare as ak
+
+        # HK: Get industry from company profile
+        if market == "HK":
+            try:
+                df = ak.stock_hk_company_profile_em(symbol=symbol)
+                if not df.empty:
+                    result["industry_name"] = df.iloc[0].get("所属行业", "") or ""
+                    result["board_name"] = result["industry_name"]
+            except Exception as e:
+                print(f"[industry] HK profile failed: {e}", flush=True)
+        else:
+            # US: Use a simplified industry mapping from stock name
+            # Get spot data for name-based industry inference
+            info = get_stock_info(code, market)
+            name = info.get("股票简称", "") if info else ""
+            result["industry_name"] = _infer_us_industry(name)
+            result["board_name"] = result["industry_name"]
+
+        # Get dividends (HK only via AKShare)
+        if market == "HK":
+            try:
+                div_df = ak.stock_hk_dividend_payout_em(symbol=symbol)
+                if div_df is not None and not div_df.empty:
+                    for _, drow in div_df.head(5).iterrows():
+                        ex_date = str(drow.get("除净日", "") or "")[:10]
+                        scheme = str(drow.get("分红方案", "") or "")
+                        # Try to parse cash per share from scheme text like "每股派港币5.3元"
+                        cash = 0
+                        import re
+                        m = re.search(r'每股派.*?([\d.]+)\s*[元]', scheme)
+                        if m: cash = float(m.group(1))
+                        result["dividends"].append({
+                            "ex_date": ex_date, "cash_per_share": cash,
+                            "dividend_ratio": 0,
+                        })
+                    if result["dividends"]:
+                        d0 = result["dividends"][0]
+                        result["latest_dividend"] = {
+                            "date": d0["ex_date"],
+                            "cash_per_share": d0["cash_per_share"],
+                            "dividend_ratio": d0["dividend_ratio"],
+                        }
+            except Exception as e:
+                print(f"[dividend] HK failed: {e}", flush=True)
+
+        print(f"[industry] {code}: industry={result['industry_name']}, dividends={len(result['dividends'])}", flush=True)
+    except Exception as e:
+        print(f"[industry] Failed for {code}: {e}", flush=True)
+
+    return result
+
+
+# US industry name → PE/PB benchmark mapping
+_US_INDUSTRY_MAP = {
+    "苹果": "科技硬件", "apple": "科技硬件",
+    "微软": "软件服务", "microsoft": "软件服务",
+    "谷歌": "互联网", "alphabet": "互联网", "google": "互联网",
+    "亚马逊": "电商/云计算", "amazon": "电商/云计算",
+    "特斯拉": "汽车/新能源", "tesla": "汽车/新能源",
+    "英伟达": "半导体", "nvidia": "半导体",
+    "meta": "互联网", "facebook": "互联网",
+    "台积电": "半导体", "tsm": "半导体",
+    "伯克希尔": "金融/保险", "berkshire": "金融/保险",
+    "摩根": "金融/银行", "jpmorgan": "金融/银行", "jp morgan": "金融/银行",
+    "强生": "医药健康", "johnson": "医药健康",
+    "辉瑞": "医药健康", "pfizer": "医药健康",
+    "默克": "医药健康", "merck": "医药健康",
+    "可口可乐": "消费品", "coca": "消费品",
+    "宝洁": "消费品", "procter": "消费品",
+    "耐克": "消费品", "nike": "消费品",
+    "波音": "工业制造", "boeing": "工业制造",
+    "卡特彼勒": "工业制造", "caterpillar": "工业制造",
+    "埃克森": "能源", "exxon": "能源",
+    "雪佛龙": "能源", "chevron": "能源",
+    "迪士尼": "传媒娱乐", "disney": "传媒娱乐",
+    "奈飞": "传媒娱乐", "netflix": "传媒娱乐",
+}
+_US_GENERIC_INDUSTRY = "科技"  # default for US
+
+
+def _infer_us_industry(name):
+    """Infer US stock industry from Chinese name."""
+    if not name: return _US_GENERIC_INDUSTRY
+    name_lower = name.lower()
+    for key, ind in _US_INDUSTRY_MAP.items():
+        if key in name_lower or key in name:
+            return ind
+    return _US_GENERIC_INDUSTRY
+
+
+# Add international sector PE benchmarks
+def _industry_pe_range_intl(industry_name):
+    """PE/PB/ROE benchmarks for international (HK/US) sectors."""
+    mapping = {
+        "软件服务": {"low": 15, "high": 40, "pb_low": 3, "pb_high": 10, "roe_avg": 12, "roe_good": 20},
+        "互联网": {"low": 12, "high": 35, "pb_low": 2, "pb_high": 8, "roe_avg": 10, "roe_good": 18},
+        "科技硬件": {"low": 12, "high": 30, "pb_low": 2, "pb_high": 7, "roe_avg": 15, "roe_good": 25},
+        "半导体": {"low": 15, "high": 45, "pb_low": 2, "pb_high": 8, "roe_avg": 12, "roe_good": 20},
+        "电商/云计算": {"low": 15, "high": 40, "pb_low": 3, "pb_high": 10, "roe_avg": 12, "roe_good": 20},
+        "金融/保险": {"low": 5, "high": 15, "pb_low": 0.5, "pb_high": 2, "roe_avg": 8, "roe_good": 15},
+        "金融/银行": {"low": 4, "high": 12, "pb_low": 0.3, "pb_high": 1.5, "roe_avg": 8, "roe_good": 12},
+        "金融": {"low": 8, "high": 20, "pb_low": 0.8, "pb_high": 2.5, "roe_avg": 8, "roe_good": 15},
+        "汽车/新能源": {"low": 10, "high": 30, "pb_low": 1, "pb_high": 5, "roe_avg": 8, "roe_good": 15},
+        "医药健康": {"low": 12, "high": 35, "pb_low": 1.5, "pb_high": 6, "roe_avg": 10, "roe_good": 18},
+        "消费品": {"low": 12, "high": 28, "pb_low": 1.5, "pb_high": 6, "roe_avg": 10, "roe_good": 18},
+        "工业制造": {"low": 8, "high": 22, "pb_low": 1, "pb_high": 4, "roe_avg": 8, "roe_good": 15},
+        "能源": {"low": 5, "high": 18, "pb_low": 0.6, "pb_high": 2.5, "roe_avg": 8, "roe_good": 12},
+        "传媒娱乐": {"low": 12, "high": 30, "pb_low": 1.5, "pb_high": 5, "roe_avg": 8, "roe_good": 15},
+        "科技": {"low": 15, "high": 35, "pb_low": 2, "pb_high": 8, "roe_avg": 12, "roe_good": 20},
+        "房地产": {"low": 5, "high": 15, "pb_low": 0.3, "pb_high": 1.5, "roe_avg": 5, "roe_good": 10},
+        "通信": {"low": 10, "high": 25, "pb_low": 1, "pb_high": 3.5, "roe_avg": 8, "roe_good": 15},
+        "其他金融": {"low": 8, "high": 25, "pb_low": 1, "pb_high": 5, "roe_avg": 10, "roe_good": 20},
+    }
+    # Exact match first
+    if industry_name in mapping:
+        return mapping[industry_name]
+    # Keyword partial match
+    for key, val in mapping.items():
+        if key in industry_name or industry_name in key:
+            return val
+    # Default: technology sector
+    return mapping["科技"]
+
+
+# ========== Market Indices API Endpoint ==========
+@app.route("/api/market_indices", methods=["POST"])
+def api_market_indices():
+    """Get market indices for a given market."""
+    data = request.json or {}
+    mkt = data.get("market", "A")
+    result = _get_market_indices(mkt)
+    return jsonify({"indices": result, "market": mkt, "market_name": MARKET_CONFIG.get(mkt, {}).get("name", "")})
+
+
 def deep_cache_clear():
     """Clear deep analysis cache for a specific stock or all."""
     data = request.json
@@ -3698,32 +5323,34 @@ def _get_stock_list():
     return result
 
 
-@app.route("/api/search")
-def search_stocks():
-    """Fuzzy search A-share stocks. Returns up to 6 matches."""
-    q = request.args.get("q", "").strip()
-    if not q or len(q) < 1:
-        return jsonify({"results": []})
+def _score_and_rank(candidates, q, top_n):
+    """Unified multi-level fuzzy scorer shared by A / HK / US search.
 
-    stock_list = _get_stock_list()
+    Each candidate: dict with keys code, name, pinyin(initials), pinyin_full(full).
+    Matching levels (same as A-share):
+      - exact/prefix/substring code
+      - exact/prefix/substring name
+      - non-contiguous ordered name chars (e.g. '光股' → '阳光股份')
+      - pinyin initials (e.g. 'tx' → '腾讯控股')
+      - full pinyin (e.g. 'txkg' → '腾讯控股')
+      - compound pinyin prefix
+    Returns top_n ranked dicts (without the score tuple)."""
     q_lower = q.lower()
-
-    # Score each stock with multi-level fuzzy matching
     scored = []
-    for s in stock_list:
+    for s in candidates:
         score = 0
-        code = s["code"]
-        name = s["name"]
+        code = s.get("code", "")
+        name = s.get("name", "")
         name_lower = name.lower()
-        pin = s.get("pinyin", "")
-        pin_full = s.get("pinyin_full", "")
+        pin = s.get("pinyin", "") or ""
+        pin_full = s.get("pinyin_full", "") or ""
 
         # --- Code matching ---
-        if code == q_lower:
+        if code.lower() == q_lower:
             score = max(score, 1000)
-        elif code.startswith(q_lower):
+        elif code.lower().startswith(q_lower):
             score = max(score, 800)
-        elif q_lower in code:
+        elif q_lower in code.lower():
             score = max(score, 600)
 
         # --- Name matching ---
@@ -3734,15 +5361,12 @@ def search_stocks():
         elif q_lower in name_lower:
             score = max(score, 500)
 
-        # --- Non-contiguous name matching: check if all query chars appear in order ---
-        # e.g., "光股" → "阳光股份" (光 at pos1, 股 at pos2, in order)
-        # Case-insensitive for English letters (e.g., "*stx" matches "*ST西旅")
+        # --- Non-contiguous ordered name matching (e.g. '光股' → '阳光股份') ---
         if len(q) >= 2 and score < 500:
             pos = 0
             match = True
-            search_name = name_lower  # use lowercased name for case-insensitive matching
             for ch in q_lower:
-                idx = search_name.find(ch, pos)
+                idx = name_lower.find(ch, pos)
                 if idx == -1:
                     match = False
                     break
@@ -3750,34 +5374,136 @@ def search_stocks():
             if match and q_lower not in name_lower:
                 score = max(score, 350)
 
-        # --- Pinyin initials matching (e.g., "htzq" → "海通证券") ---
+        # --- Pinyin initials matching (e.g. 'tx' → '腾讯控股') ---
         if pin and q_lower in pin:
             score = max(score, 400)
 
-        # --- Full pinyin matching (e.g., "huatai" → "华泰证券") ---
+        # --- Full pinyin matching (e.g. 'txkg' → '腾讯控股') ---
         if pin_full and q_lower in pin_full:
             score = max(score, 420)
 
-        # --- Compound pinyin matching: split query by known pinyin boundaries ---
-        # e.g., "haitong" → matches name starting with "海通"
+        # --- Compound pinyin prefix matching ---
         if pin_full and len(q_lower) >= 3 and q_lower not in pin_full and q_lower not in (pin or ''):
-            # Try checking if each char of the query appears neatly in the full pinyin
-            sub_match = True
             test_pos = 0
             for ch in pin_full:
                 if test_pos < len(q_lower) and ch == q_lower[test_pos]:
                     test_pos += 1
-            if test_pos >= len(q_lower) * 0.7:  # 70% of chars matched
+            if test_pos >= len(q_lower) * 0.7:
                 score = max(score, 300)
 
         if score > 0:
             scored.append((score, s))
 
-    # Sort by score desc, take top 6
     scored.sort(key=lambda x: x[0], reverse=True)
-    results = [s for _, s in scored[:6]]
+    return [s for _, s in scored[:top_n]]
 
-    return jsonify({"results": results})
+
+_HK_US_LIST_CACHE = {}
+
+
+def _get_hk_us_list(mkt):
+    """Curated popular HK/US stocks with pinyin (cached). Enables A-share-like
+    initials / full-pinyin / fuzzy matching for the most-searched names."""
+    global _HK_US_LIST_CACHE
+    if _HK_US_LIST_CACHE.get(mkt):
+        return _HK_US_LIST_CACHE[mkt]
+    data = HK_US_STOCKS.get(mkt, [])
+    result = []
+    for code, name in data:
+        pin = _build_pinyin_info(name)
+        result.append({
+            "code": code,
+            "code_full": f"{code}.{mkt}",
+            "name": name,
+            "market": mkt,
+            "pinyin": pin["initials"],
+            "pinyin_full": pin["full"],
+        })
+    _HK_US_LIST_CACHE[mkt] = result
+    print(f"[stock_list] HK/US curated {mkt}: {len(result)} stocks")
+    return result
+
+
+def _smartbox_search(q, mkt):
+    """Tencent smartbox for HK/US (long-tail coverage beyond the curated list).
+    Field format: hk~00700~腾讯控股~txkg~GP  (field[3] = pinyin initials)."""
+    cfg = MARKET_CONFIG.get(mkt, {})
+    t_code = cfg.get("search_t_code")
+    if not t_code:
+        return []
+    try:
+        url = f"https://smartbox.gtimg.cn/s3/?q={quote(q)}&t={t_code}"
+        resp = _http_get(url, timeout=8)
+        text = resp.text.strip()
+        if not text or text == "None" or "=" not in text:
+            return []
+        parts = text.split('"')
+        if len(parts) < 2:
+            return []
+        raw = parts[1]
+        results = []
+        for item in raw.split("^"):
+            fields = item.split("~")
+            if len(fields) < 3:
+                continue
+            raw_code = fields[1]
+            name = fields[2]
+            # Tencent smartbox embeds literal \uXXXX escapes inside the JS
+            # string (e.g. "\u817e\u8baf\u63a7\u80a1"); decode them so the
+            # names render as real Chinese instead of "\u817e..." in the UI.
+            if "\\u" in name:
+                try:
+                    name = re.sub(r"\\u([0-9a-fA-F]{4})",
+                                  lambda m: chr(int(m.group(1), 16)), name)
+                except Exception:
+                    pass
+            smart_pinyin = fields[3] if len(fields) >= 4 else ""
+            clean_code = raw_code.split(".")[0] if mkt == "US" else raw_code
+            # Build full pinyin from the name; reuse smartbox initials if present.
+            pin_full_info = _build_pinyin_info(name)
+            results.append({
+                "code": clean_code,
+                "code_full": f"{clean_code}.{mkt}",
+                "name": name,
+                "market": mkt,
+                "pinyin": smart_pinyin or pin_full_info["initials"],
+                "pinyin_full": pin_full_info["full"],
+            })
+        return results
+    except Exception as e:
+        print(f"[Search] smartbox {mkt} failed: {e}")
+        return []
+
+
+@app.route("/api/search")
+def search_stocks():
+    """Fuzzy search stocks. Supports A-share / HK / US via market filter.
+    All three markets share the same multi-level fuzzy scorer (code / name /
+    pinyin initials / full pinyin / non-contiguous). HK/US additionally merge
+    Tencent smartbox results for long-tail coverage."""
+    q = request.args.get("q", "").strip()
+    mkt = request.args.get("market", "A")
+    if not q or len(q) < 1:
+        return jsonify({"results": []})
+
+    if mkt == "A":
+        stock_list = _get_stock_list()
+        results = _score_and_rank(stock_list, q, 6)
+        for r in results:
+            r["market"] = "A"
+        return jsonify({"results": results, "market": "A"})
+
+    # ---- HK / US: curated local list (pinyin + fuzzy) + smartbox long-tail ----
+    candidates = list(_get_hk_us_list(mkt))
+    local_codes = {c["code"] for c in candidates}
+    for s in _smartbox_search(q, mkt):
+        if s["code"] not in local_codes:
+            candidates.append(s)
+
+    results = _score_and_rank(candidates, q, 12)
+    for r in results:
+        r["market"] = mkt
+    return jsonify({"results": results, "market": mkt})
 
 
 @app.route("/api/search/refresh")

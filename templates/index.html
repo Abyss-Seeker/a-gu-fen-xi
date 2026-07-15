@@ -21,6 +21,22 @@
     .tag-sh { background: #e17055; color: #fff; }
     .tag-sz { background: #0984e3; color: #fff; }
     .tag-bj { background: #6c5ce7; color: #fff; }
+    .tag-hk { background: #e17055; color: #fff; }
+    .tag-us { background: #0984e3; color: #fff; }
+
+    /* Market Switcher Tabs */
+    .market-tabs-container { max-width: 1200px; margin: 0 auto 16px; padding: 0 16px; }
+    .market-tabs { display: flex; gap: 4px; background: #f1f2f6; padding: 4px; border-radius: 12px; }
+    .market-tab { display: flex; align-items: center; gap: 6px; padding: 10px 20px; border: none; background: transparent; border-radius: 10px; cursor: pointer; font-size: 0.9rem; font-weight: 500; color: #64748b; transition: all 0.2s ease; flex: 1; justify-content: center; }
+    .market-tab:hover { background: #e2e8f0; color: #334155; }
+    .market-tab.active { background: #fff; color: var(--primary); font-weight: 700; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+    .market-tab-flag { font-size: 1.1rem; }
+    .market-tab-label { white-space: nowrap; }
+    .market-hint { font-size: 0.75rem; color: var(--text-secondary); margin-top: 6px; text-align: center; }
+    .market-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.7rem; font-weight: 700; margin-left: 6px; }
+    .market-badge-a { background: #e8f4fd; color: #0984e3; }
+    .market-badge-hk { background: #fef3e2; color: #d68910; }
+    .market-badge-us { background: #e8f4fd; color: #0984e3; }
 
     /* Search autocomplete dropdown */
     .search-wrapper { position: relative; flex: 1; }
@@ -51,20 +67,41 @@
     </div>
   </header>
 
+  <!-- Market Switcher -->
+  <div class="market-tabs-container">
+    <div class="market-tabs" id="marketTabs">
+      <button class="market-tab active" data-market="A">
+        <span class="market-tab-flag">🇨🇳</span>
+        <span class="market-tab-label">A股</span>
+      </button>
+      <button class="market-tab" data-market="HK">
+        <span class="market-tab-flag">🇭🇰</span>
+        <span class="market-tab-label">港股</span>
+      </button>
+      <button class="market-tab" data-market="US">
+        <span class="market-tab-flag">🇺🇸</span>
+        <span class="market-tab-label">美股</span>
+      </button>
+    </div>
+    <div class="market-hint" id="marketHint">
+      输入A股代码（如 000001.SZ）或名称；纯数字代码自动识别
+    </div>
+  </div>
+
   <!-- Main Content -->
   <div class="container">
     <!-- Search -->
     <div class="search-section">
       <div class="search-wrapper">
         <input type="text" id="searchCode" class="search-input"
-               placeholder="输入股票代码或名称，如 000607、茅台、600519.SH，按 Enter 搜索"
+               placeholder="输入股票代码或名称，如 A股：000607、茅台 ｜ 港股：00700.HK ｜ 美股：AAPL.US"
                autocomplete="off">
         <div class="search-dropdown" id="searchDropdown" style="display:none"></div>
       </div>
       <button class="btn btn-primary" id="searchBtn">🔍 开始分析</button>
       <div style="width:100%;margin-top:-4px">
-        <div class="search-hint">支持格式：000607.SZ / 600968.SH / 纯数字代码</div>
-        <div class="quick-examples">
+        <div class="search-hint" id="searchFormatHint">支持格式：A股 000607.SZ / 600968.SH | 港股 00700.HK | 美股 AAPL.US</div>
+        <div class="quick-examples" id="quickExamples">
           <span class="quick-example" onclick="quickSearch('000607.SZ')"><span class="tag tag-sz">SZ</span>华媒控股</span>
           <span class="quick-example" onclick="quickSearch('600968.SH')"><span class="tag tag-sh">SH</span>海油发展</span>
           <span class="quick-example" onclick="quickSearch('000001.SZ')"><span class="tag tag-sz">SZ</span>平安银行</span>
@@ -205,7 +242,7 @@
   <script src="/static/js/app.js?v={{ cache_buster }}"></script>
 
   <footer style="text-align:center;padding:20px;color:var(--text-secondary);font-size:0.78rem">
-    数据来源：腾讯自选股 + 东方财富（免费公开接口）| AI 生成内容仅供参考，不构成投资建议
+    数据来源：腾讯自选股 + 东方财富 + Yahoo Finance（免费公开接口）| 支持A股/港股/美股（Beta）| AI 生成内容仅供参考，不构成投资建议
   </footer>
 </body>
 </html>

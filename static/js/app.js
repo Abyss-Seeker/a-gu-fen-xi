@@ -9,6 +9,7 @@
   let chatOpen = false;
   let settingsOpen = false;
   let deepAnalyzing = {};  // track which dims are currently analyzing
+  let currentMarket = 'A';  // 'A' | 'HK' | 'US'
 
   // ========== Query History ==========
   const HISTORY_KEY = 'stock_analyzer_history';
@@ -61,7 +62,100 @@
   const settingsOverlay = $('#settingsOverlay');
   const settingsModal = $('#settingsModal');
 
-  // ========== Loading ==========
+  // ========== Market Switcher ==========
+  const marketTabs = $('#marketTabs');
+  const marketHint = $('#marketHint');
+  const searchFormatHint = $('#searchFormatHint');
+  const quickExamples = $('#quickExamples');
+
+  const MARKET_CONFIG = {
+    A: {
+      name: 'A股', flag: '🇨🇳',
+      hint: '输入A股代码（如 000001.SZ）或名称；纯数字代码自动识别',
+      formatHint: '支持格式：000607.SZ / 600968.SH / 纯数字代码',
+      examples: [
+        { code: '000607.SZ', name: '华媒控股', tag: 'SZ', tagClass: 'tag-sz' },
+        { code: '600968.SH', name: '海油发展', tag: 'SH', tagClass: 'tag-sh' },
+        { code: '000001.SZ', name: '平安银行', tag: 'SZ', tagClass: 'tag-sz' },
+        { code: '600519.SH', name: '贵州茅台', tag: 'SH', tagClass: 'tag-sh' },
+        { code: '300750.SZ', name: '宁德时代', tag: 'SZ', tagClass: 'tag-sz' },
+        { code: '601975.SH', name: '招商南油', tag: 'SH', tagClass: 'tag-sh' },
+      ],
+      placeholder: '输入A股代码或名称，如 000607、茅台、600519.SH',
+    },
+    HK: {
+      name: '港股', flag: '🇭🇰',
+      hint: '输入港股代码（如 00700.HK 或 00700）',
+      formatHint: '支持格式：00700.HK / 00700 / 腾讯控股',
+      examples: [
+        { code: '00700.HK', name: '腾讯控股', tag: 'HK', tagClass: 'tag-hk' },
+        { code: '09988.HK', name: '阿里巴巴', tag: 'HK', tagClass: 'tag-hk' },
+        { code: '00941.HK', name: '中国移动', tag: 'HK', tagClass: 'tag-hk' },
+        { code: '00388.HK', name: '港交所', tag: 'HK', tagClass: 'tag-hk' },
+        { code: '00005.HK', name: '汇丰控股', tag: 'HK', tagClass: 'tag-hk' },
+        { code: '02318.HK', name: '中国平安', tag: 'HK', tagClass: 'tag-hk' },
+      ],
+      placeholder: '输入港股代码，如 00700.HK、腾讯控股',
+    },
+    US: {
+      name: '美股', flag: '🇺🇸',
+      hint: '输入美股代码（如 AAPL.US 或 AAPL）',
+      formatHint: '支持格式：AAPL.US / AAPL / Apple',
+      examples: [
+        { code: 'AAPL.US', name: 'Apple', tag: 'US', tagClass: 'tag-us' },
+        { code: 'MSFT.US', name: 'Microsoft', tag: 'US', tagClass: 'tag-us' },
+        { code: 'GOOGL.US', name: 'Alphabet', tag: 'US', tagClass: 'tag-us' },
+        { code: 'TSLA.US', name: 'Tesla', tag: 'US', tagClass: 'tag-us' },
+        { code: 'NVDA.US', name: 'NVIDIA', tag: 'US', tagClass: 'tag-us' },
+        { code: 'AMZN.US', name: 'Amazon', tag: 'US', tagClass: 'tag-us' },
+      ],
+      placeholder: '输入美股代码，如 AAPL.US、Apple',
+    },
+  };
+
+  function switchMarket(marketKey) {
+    currentMarket = marketKey;
+    var cfg = MARKET_CONFIG[marketKey];
+
+    // Update tabs
+    var tabs = document.querySelectorAll('#marketTabs .market-tab');
+    tabs.forEach(function(t) {
+      t.classList.toggle('active', t.getAttribute('data-market') === marketKey);
+    });
+
+    // Update hints
+    if (marketHint) marketHint.textContent = cfg.hint;
+    if (searchFormatHint) searchFormatHint.textContent = cfg.formatHint;
+    searchInput.placeholder = cfg.placeholder;
+
+    // Update quick examples
+    if (quickExamples) {
+      quickExamples.innerHTML = cfg.examples.map(function(ex) {
+        return '<span class="quick-example" onclick="quickSearch(\'' + ex.code + '\')">' +
+          '<span class="tag ' + ex.tagClass + '">' + ex.tag + '</span>' + ex.name + '</span>';
+      }).join('');
+    }
+
+    // Reset
+    clearReport();
+  }
+
+  // Tab click handlers
+  if (marketTabs) {
+    marketTabs.addEventListener('click', function(e) {
+      var tab = e.target.closest('.market-tab');
+      if (!tab) return;
+      var mkt = tab.getAttribute('data-market');
+      if (mkt) switchMarket(mkt);
+    });
+  }
+
+  function clearReport() {
+    reportArea.innerHTML = '';
+    reportArea.classList.add('hidden');
+    emptyState.classList.remove('hidden');
+    currentReport = null;
+  }
   function showLoading(msg) {
     loadingText.textContent = msg || '正在分析中...';
     loadingOverlay.classList.add('active');
@@ -155,35 +249,39 @@
 
   async function fetchSearchSuggestions(q) {
     try {
-      var resp = await fetch('/api/search?q=' + encodeURIComponent(q));
+      var resp = await fetch('/api/search?q=' + encodeURIComponent(q) + '&market=' + currentMarket);
       var data = await resp.json();
       var results = data.results || [];
-      renderSearchDropdown(results);
+      renderSearchDropdown(results, data.market || 'A');
     } catch (err) {
       console.warn('[Search] Autocomplete error:', err.message);
     }
   }
 
-  function renderSearchDropdown(results) {
+  function renderSearchDropdown(results, mkt) {
     var dropdown = document.getElementById('searchDropdown');
     if (!dropdown) return;
     _searchDropdownIdx = -1;
+    mkt = mkt || 'A';
 
     if (results.length === 0) {
       dropdown.style.display = 'none';
       return;
     }
 
+    var tagClasses = { 'A': { 'SH': 'tag-sh', 'SZ': 'tag-sz', 'BJ': 'tag-bj' }, 'HK': { 'HK': 'tag-hk' }, 'US': { 'US': 'tag-us' } };
     var html = '';
     for (var i = 0; i < results.length; i++) {
       var r = results[i];
-      var tag = r.code_full && r.code_full.endsWith('.SH') ? 'tag-sh' : 'tag-sz';
-      var tagLabel = r.code_full && r.code_full.endsWith('.SH') ? 'SH' : 'SZ';
-      html += '<div class="search-dropdown-item" data-code-full="' + (r.code_full || '') +
-        '" data-idx="' + i + '">' +
-        '<span class="tag ' + tag + '">' + tagLabel + '</span>' +
+      var rmkt = r.market || mkt;
+      var codeFull = r.code_full || r.code || '';
+      var suffix = codeFull.indexOf('.') >= 0 ? codeFull.split('.').pop() : rmkt;
+      var tagClass = (tagClasses[rmkt] && tagClasses[rmkt][suffix]) ? tagClasses[rmkt][suffix] : 'tag-sz';
+      html += '<div class="search-dropdown-item" data-code-full="' + codeFull +
+        '" data-idx="' + i + '" data-market="' + rmkt + '">' +
+        '<span class="tag ' + tagClass + '">' + suffix + '</span>' +
         '<span class="search-item-name">' + (r.name || '') + '</span>' +
-        '<span class="search-item-code">' + (r.code_full || r.code || '') + '</span>' +
+        '<span class="search-item-code">' + codeFull + '</span>' +
         '</div>';
     }
     dropdown.innerHTML = html;
@@ -194,6 +292,9 @@
     items.forEach(function(item) {
       item.addEventListener('click', function() {
         searchInput.value = item.getAttribute('data-code-full') || '';
+        // Auto-switch market if different
+        var itemMarket = item.getAttribute('data-market') || 'A';
+        if (itemMarket !== currentMarket) switchMarket(itemMarket);
         hideSearchDropdown();
         analyzeStock(searchInput.value.trim());
       });
@@ -272,6 +373,13 @@
     const pb = r.pb || 0;
     const totalMv = r.total_mv ? (r.total_mv).toFixed(2) : '--';
     const circMv = r.circ_mv ? (r.circ_mv).toFixed(2) : '--';
+    const market = r.market || 'A';
+    const marketName = r.market_name || (MARKET_CONFIG[market] ? MARKET_CONFIG[market].name : '');
+    const currency = r.currency || '¥';
+    const currencyLabel = r.currency_label || '元';
+    const marketFlag = MARKET_CONFIG[market] ? MARKET_CONFIG[market].flag : '🇨🇳';
+    // Sync market state to current
+    if (market !== currentMarket) { currentMarket = market; }
 
     const totalScore = r.total_score || 0;
     const maxScore = r.max_score || 100;
@@ -295,13 +403,13 @@
             <span class="stock-title-emoji">${boardEmoji}</span>
           </div>
           <div class="stock-title-center">
-            <h1 class="stock-title-name">${name}</h1>
+            <h1 class="stock-title-name">${name} <span class="market-badge market-badge-${market.toLowerCase()}">${marketFlag} ${marketName}</span></h1>
             <div class="stock-title-code">${r.code || code}</div>
             ${boardLabel ? `<div class="stock-title-board">${boardLabel}</div>` : ''}
             <div class="stock-title-time">📅 分析时间：${r.report_time || ''}</div>
           </div>
           <div class="stock-title-right">
-            <div class="stock-title-price">¥ ${price.toFixed(2)}</div>
+            <div class="stock-title-price">${currency} ${price.toFixed(2)}</div>
             <div class="stock-title-change ${r.change_pct >= 0 ? 'trend-up' : 'trend-down'}">${r.change_pct > 0 ? '+' : ''}${(r.change_pct||0).toFixed(2)}%</div>
           </div>
         </div>
@@ -390,7 +498,7 @@
         </div>
         <div class="section-body">
           <div class="stat-grid">
-            <div class="stat-item"><div class="stat-label">最新股价</div><div class="stat-value">${price.toFixed(2)} 元</div></div>
+            <div class="stat-item"><div class="stat-label">最新股价</div><div class="stat-value">${currency} ${price.toFixed(2)}</div></div>
             <div class="stat-item"><div class="stat-label">涨跌幅</div><div class="stat-value ${r.change_pct >= 0 ? 'trend-up' : 'trend-down'}">${r.change_pct > 0 ? '+' : ''}${r.change_pct.toFixed(2)}%</div></div>
             <div class="stat-item"><div class="stat-label">PE(TTM)</div><div class="stat-value">${pe > 0 ? pe.toFixed(2) : '亏损'}</div></div>
             <div class="stat-item"><div class="stat-label">PB</div><div class="stat-value">${pb.toFixed(2)}</div></div>
@@ -704,6 +812,10 @@
       }).join('');
     }
 
+    // Note: HK/US volume analysis can't break down by order size
+    const allZero = super5d === 0 && large5d === 0 && retail5d === 0;
+    const flowNote = allZero ? `<div class="risk-alert" style="background:#fef9e7;border-color:#f39c12;color:#8a6d00;margin-top:8px;font-size:0.78rem">📝 超大单/大单/散户显示为 0 是正常的：港股美股使用量价分析替代A股「主力资金流」接口。系统通过成交量方向判断进出，无法按订单大小分类，但每日净流入趋势依然准确。</div>` : '';
+
     return `
       <div class="stat-grid">
         <div class="stat-item"><div class="stat-label">近5日主力净流入</div><div class="stat-value ${main5d >= 0 ? 'trend-up' : 'trend-down'}">${main5d > 0 ? '+' : ''}${main5d.toFixed(0)} 万</div></div>
@@ -713,6 +825,7 @@
         <div class="stat-item"><div class="stat-label">主力流入天数(近5日)</div><div class="stat-value">${inflowDays}/5</div></div>
         <div class="stat-item"><div class="stat-label">近10日趋势</div><div class="stat-value" style="font-size:0.9rem">${trend}</div></div>
       </div>
+      ${flowNote}
       ${structure ? `<div class="risk-alert ${structure.includes('偏多') ? 'good' : 'danger'}">📊 ${structure}</div>` : ''}
       ${divergence ? `<div class="risk-alert danger">⚠️ ${divergence}</div>` : ''}
       ${flowBars ? `
@@ -1600,7 +1713,7 @@
           '<div class="alt-name"><span class="alt-rank">#' + (i+1) + '</span> ' + (a.name || '') + '</div>' +
           '<div class="alt-code">' + fullCode + '</div>' +
           '<div class="alt-stats">' +
-            '<div class="alt-stat"><div class="alt-stat-label">价格</div><span>¥' + ((a.price||0)).toFixed(2) + '</span></div>' +
+            '<div class="alt-stat"><div class="alt-stat-label">价格</div><span>' + (currentMarket === 'HK' ? 'HK$' : currentMarket === 'US' ? 'US$' : '¥') + ((a.price||0)).toFixed(2) + '</span></div>' +
             '<div class="alt-stat"><div class="alt-stat-label">PE</div><span>' + ((a.pe||0) > 0 ? (a.pe||0).toFixed(1) : '亏损') + '</span></div>' +
             '<div class="alt-stat"><div class="alt-stat-label">PB</div><span>' + ((a.pb||0)).toFixed(2) + '</span></div>' +
             '<div class="alt-stat"><div class="alt-stat-label">涨跌</div><span class="' + ((a.change||0) >= 0 ? 'trend-up' : 'trend-down') + '">' + ((a.change||0) > 0 ? '+' : '') + (a.change||0).toFixed(2) + '%</span></div>' +

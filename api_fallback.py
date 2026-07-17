@@ -354,7 +354,9 @@ def em_get_price_history(code, days=250, market=None):
             "fields1": "f1,f2,f3,f4,f5,f6",
             "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
             "klt": "101",        # daily K-line
-            "fqt": "1",          # 前复权 (forward-adjusted)
+            # HK/US: use 后复权 (fqt=2). 前复权 (fqt=1) over
+            # multi-year high-dividend/split history yields NEGATIVE early bars.
+            "fqt": "2" if market in ("HK", "US") else "1",
             "end": "20500101",
             "lmt": request_lmt,
         }

@@ -994,41 +994,86 @@ def _estimate_fundamentals_from_tencent(code, market):
         return None
 
 
-def _fetch_em_hk_us_financials(code, market):
-    """Primary: EastMoney global financial data via AKShare (no API key, always free).
-    Calls stock_financial_hk_analysis_indicator_em or stock_financial_us_analysis_indicator_em."""
+def _em_datacenter(report_name, filter_str, source="F10", v="01975982096513973",
+                    pagesize=30, sort_col="STD_REPORT_DATE"):
+    """Direct EastMoney datacenter API (no akshare, Vercel-safe). Returns list of row-dicts or []."""
+    cache_key = f"emdc_{report_name}_{filter_str}"
+    cv = cached(cache_key, ttl=600)
+    if cv is not None:
+        return cv
     try:
-        import akshare as ak
-        symbol = code.replace(".SZ", "").replace(".SH", "").replace(".BJ", "").replace(".HK", "").replace(".US", "")
+        params = {
+            "reportName": report_name,
+            "columns": "ALL",
+            "quoteColumns": "",
+            "filter": filter_str,
+            "pageNumber": "1",
+            "pageSize": str(pagesize),
+            "sortTypes": "-1",
+            "sortColumns": sort_col,
+            "source": source,
+            "client": "PC",
+            "v": v,
+        }
+        resp = _http_get(EM_DATACENTER, params=params, timeout=15)
+        data = resp.json()
+        rows = (data.get("result") or {}).get("data") or []
+        cache_set(cache_key, rows)
+        return rows
+    except Exception as e:
+        print(f"[_em_datacenter] {report_name} failed: {e}")
+        return []
 
+
+def _fetch_em_hk_us_financials(code, market):
+    """Primary: EastMoney HK/US financial indicators via datacenter HTTP (no akshare, Vercel-safe).
+    HK: RPT_HKF10_FN_MAININDICATOR ; US: RPT_USF10_FN_GMAININDICATOR
+    (SECUCODE resolved via RPT_USF10_INFO_ORGPROFILE)."""
+    symbol = code.replace(".HK", "").replace(".US", "")
+    try:
         if market == "HK":
-            df = ak.stock_financial_hk_analysis_indicator_em(symbol=symbol)
+            rows = _em_datacenter(
+                "RPT_HKF10_FN_MAININDICATOR",
+                f'(SECUCODE="{symbol}.HK")(DATE_TYPE_CODE="001")',
+                source="F10", v="01975982096513973", pagesize=20,
+                sort_col="STD_REPORT_DATE",
+            )
         else:
-            df = ak.stock_financial_us_analysis_indicator_em(symbol=symbol)
+            org = _em_datacenter(
+                "RPT_USF10_INFO_ORGPROFILE",
+                f'(SECURITY_CODE="{symbol}")',
+                source="SECURITIES", v="04406064331266868", pagesize=5,
+                sort_col="REPORT_DATE",
+            )
+            secucode = (org[0].get("SECUCODE", "") if org else "") or f"{symbol}.O"
+            rows = _em_datacenter(
+                "RPT_USF10_FN_GMAININDICATOR",
+                f'(SECUCODE="{secucode}")(DATE_TYPE_CODE="001")',
+                source="SECURITIES", v="04406064331266868", pagesize=30,
+                sort_col="REPORT_DATE",
+            )
 
-        if df is None or df.empty:
+        if not rows:
             return None
 
-        # Filter annual reports only (DATE_TYPE_CODE "001")
-        if "DATE_TYPE_CODE" in df.columns:
-            df = df[df["DATE_TYPE_CODE"] == "001"]
-        if df.empty:
-            return None
+        # Defensive annual-only filter (query already restricts 001)
+        rows = [r for r in rows if r.get("DATE_TYPE_CODE") in (None, "", "001")]
 
-        # Field mapping — differs slightly between HK and US
         if market == "HK":
             rev_col = "OPERATE_INCOME"
             ni_col = "HOLDER_PROFIT"
             eps_col = "BASIC_EPS"
             bps_col = "BPS"
+            yoy_ni = "HOLDER_PROFIT_YOY"
         else:
             rev_col = "OPERATE_INCOME"
             ni_col = "PARENT_HOLDER_NETPROFIT"
             eps_col = "BASIC_EPS"
             bps_col = None  # US doesn't have BPS in this dataset
+            yoy_ni = "PARENT_HOLDER_NETPROFIT_YOY"
 
         income = []
-        for _, row in df.iterrows():
+        for row in rows:
             report_date = str(row.get("REPORT_DATE", "") or "")
             rev = float(row.get(rev_col, 0) or 0)
             ni = float(row.get(ni_col, 0) or 0)
@@ -1036,7 +1081,7 @@ def _fetch_em_hk_us_financials(code, market):
             bps = float(row.get(bps_col, 0) or 0) if bps_col else 0
             roe = float(row.get("ROE_AVG", 0) or 0)
             rev_yoy = float(row.get("OPERATE_INCOME_YOY", 0) or 0)
-            ni_yoy = float(row.get("HOLDER_PROFIT_YOY" if market == "HK" else "PARENT_HOLDER_NETPROFIT_YOY", 0) or 0)
+            ni_yoy = float(row.get(yoy_ni, 0) or 0)
 
             income.append({
                 "报告期": report_date[:10] if report_date else "",
@@ -1052,13 +1097,11 @@ def _fetch_em_hk_us_financials(code, market):
                 "净利同比": round(ni_yoy, 2),
             })
 
-        # Gross/Net margin from latest
         latest = income[0] if income else {}
-        gm = float(df.iloc[0].get("GROSS_PROFIT_RATIO", 0) or 0)
-        nm = float(df.iloc[0].get("NET_PROFIT_RATIO", 0) or 0)
-        dar = float(df.iloc[0].get("DEBT_ASSET_RATIO", 0) or 0)
+        gm = float(rows[0].get("GROSS_PROFIT_RATIO", 0) or 0)
+        nm = float(rows[0].get("NET_PROFIT_RATIO", 0) or 0)
+        dar = float(rows[0].get("DEBT_ASSET_RATIO", 0) or 0)
 
-        # Balance sheet basic (debt ratio is enough for scoring)
         balance = [{
             "报告期": income[0]["报告期"] if income else "",
             "报告类型": "年报",
@@ -1067,16 +1110,18 @@ def _fetch_em_hk_us_financials(code, market):
             "资产负债率": round(dar, 2),
         }]
 
-        print(f"[akshare_em] OK for {code}: {len(income)} years, ROE={latest.get('加权ROE','?')}%, GM={gm}%", flush=True)
+        print(f"[em_http] OK for {code}: {len(income)} years, ROE={latest.get('加权ROE','?')}%, GM={gm}%", flush=True)
         return {
             "income": income, "balance": balance, "quarterly": [],
             "gross_margin": round(gm, 2) if gm else None,
             "net_margin": round(nm, 2) if nm else None,
-            "_source": "akshare_eastmoney",
+            "_source": "eastmoney_http",
         }
     except Exception as e:
-        print(f"[akshare_em] Failed for {code}: {e}", flush=True)
+        print(f"[em_http] Failed for {code}: {e}", flush=True)
         return None
+
+
 
 
 def get_financial_data(code, market="A"):
@@ -4845,96 +4890,129 @@ def _get_market_money_flow(code, market, prices_data=None):
     return result
 
 
-def _get_market_news(code, market):
-    """News/events for HK/US: EastMoney news via AKShare (free, no key)."""
-    cfg = MARKET_CONFIG.get(market, {})
-    symbol = code.replace(".SZ", "").replace(".SH", "").replace(".BJ", "").replace(".HK", "").replace(".US", "")
+# ---- Shared sentiment keyword libraries (HK/US news) ----
+POS_KW = [
+    ("大涨", 5), ("增持", 3), ("回购", 3), ("超预期", 3), ("利好", 3), ("中标", 3),
+    ("合作", 2), ("突破", 3), ("获批", 3), ("增长", 2), ("创新高", 3), ("净流入", 2),
+    ("买入评级", 3), ("上调目标价", 3), ("收购", 2), ("分红", 2), ("派息", 2), ("业绩预增", 4),
+    ("扭亏", 4), ("扭亏为盈", 4), ("盈利", 1), ("收益", 1), ("上升", 1), ("反弹", 2),
+    ("战略合作", 3), ("签署协议", 2), ("获得订单", 3), ("产能扩张", 2), ("产品获批", 3),
+    ("政策利好", 3), ("补贴", 2), ("研发突破", 3), ("专利", 2),
+    ("机构增持", 3), ("外资流入", 2), ("南下资金", 2),
+    ("ETF纳入", 2), ("指数纳入", 2),
+]
+NEG_KW = [
+    ("大跌", 5), ("减持", 3), ("亏损", 4), ("暴雷", 5), ("处罚", 4), ("罚款", 3),
+    ("立案调查", 5), ("退市", 5), ("违约", 5), ("诉讼", 3), ("仲裁", 3),
+    ("业绩预亏", 4), ("下滑", 2), ("不及预期", 3), ("下调目标价", 3), ("卖出评级", 3),
+    ("监管", 3), ("停牌", 3), ("重组失败", 4), ("终止", 3),
+    ("裁员", 2), ("关闭", 2), ("召回", 3), ("事故", 4),
+]
+
+
+def _em_news_search(keyword):
+    """EastMoney news search (JSONP) by keyword. Returns raw item list or []."""
+    if not keyword:
+        return []
     try:
-        import akshare as ak
-        ak_symbol = f"{symbol}.HK" if market == "HK" else symbol
-        df = ak.stock_news_em(symbol=ak_symbol)
-        if df is None or df.empty:
+        url = "https://search-api-web.eastmoney.com/search/jsonp"
+        inner = {
+            "uid": "", "keyword": keyword,
+            "type": ["cmsArticleWebOld"],
+            "client": "web", "clientType": "web", "clientVersion": "curr",
+            "param": {"cmsArticleWebOld": {
+                "searchScope": "default", "sort": "default",
+                "pageIndex": 1, "pageSize": 12,
+                "preTag": "<em>", "postTag": "</em>",
+            }},
+        }
+        params = {
+            "cb": "jQuery35101792940631092459_1764599530165",
+            "param": json.dumps(inner, ensure_ascii=False),
+            "_": str(int(time.time() * 1000)),
+        }
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Referer": "https://so.eastmoney.com/news/s",
+        }
+        resp = _http_get(url, params=params, headers_extra=headers, timeout=15)
+        text = resp.text
+        m = re.search(r"jQuery\d+_\d+\((.*)\)\s*$", text, re.S)
+        if not m:
             return []
-
-        # Sentiment keyword library (shared with A-share scoring)
-        positive_kw = [
-            ("大涨", 5), ("增持", 3), ("回购", 3), ("超预期", 3), ("利好", 3), ("中标", 3),
-            ("合作", 2), ("突破", 3), ("获批", 3), ("增长", 2), ("创新高", 3), ("净流入", 2),
-            ("买入评级", 3), ("上调目标价", 3), ("收购", 2), ("分红", 2), ("派息", 2), ("业绩预增", 4),
-            ("扭亏", 4), ("扭亏为盈", 4), ("盈利", 1), ("收益", 1), ("上升", 1), ("反弹", 2),
-            ("战略合作", 3), ("签署协议", 2), ("获得订单", 3), ("产能扩张", 2), ("产品获批", 3),
-            ("政策利好", 3), ("补贴", 2), ("研发突破", 3), ("专利", 2),
-            ("机构增持", 3), ("外资流入", 2), ("南下资金", 2),
-            ("ETF纳入", 2), ("指数纳入", 2),
-        ]
-        negative_kw = [
-            ("大跌", 5), ("减持", 3), ("亏损", 4), ("暴雷", 5), ("处罚", 4), ("罚款", 3),
-            ("立案调查", 5), ("退市", 5), ("违约", 5), ("诉讼", 3), ("仲裁", 3),
-            ("业绩预亏", 4), ("下滑", 2), ("不及预期", 3), ("下调目标价", 3), ("卖出评级", 3),
-            ("监管", 3), ("停牌", 3), ("重组失败", 4), ("终止", 3),
-            ("裁员", 2), ("关闭", 2), ("召回", 3), ("事故", 4),
-        ]
-
-        events = []
-        for _, row in df.head(15).iterrows():
-            title = row.get("新闻标题", "") or ""
-            pub_time = str(row.get("发布时间", "") or "")[:10]
-            source = row.get("文章来源", "") or ""
-            url = row.get("新闻链接", "") or ""
-
-            # Sentiment analysis — net-based (correct: keep positive AND
-            # negative weights, label by the dominant side).
-            pos_score = 0
-            neg_score = 0
-            for kw, w in positive_kw:
-                if kw in title:
-                    pos_score += w
-            for kw, w in negative_kw:
-                if kw in title:
-                    neg_score += w
-            if pos_score > neg_score:
-                sent = "positive"
-                sent_score = min(pos_score - neg_score, 5)
-            elif neg_score > pos_score:
-                sent = "negative"
-                sent_score = min(neg_score - pos_score, 5)
-            else:
-                sent = "neutral"
-                sent_score = 0
-
-            events.append({
-                "date": pub_time, "title": title, "type": source or "新闻",
-                "url": url, "sentiment": sent, "sentiment_score": sent_score,
-            })
-
-        return events
+        data = json.loads(m.group(1))
+        return data.get("result", {}).get("cmsArticleWebOld", []) or []
     except Exception as e:
-        print(f"[news] Failed for {code}: {e}", flush=True)
+        print(f"[news_search] keyword={keyword} failed: {e}")
         return []
 
 
-# HK industry inference from the curated name (no akshare; Vercel-safe).
-# Each rule returns a label that contains a _SECTOR_MAP key so _coarse_sector()
-# maps it back to the same sector taxonomy the candidate pool uses.
-_HK_INDUSTRY_RULES = [
-    (("银行",), "银行"),
-    (("保险",), "保险"),
-    (("交易所", "复星国际", "众安在线"), "综合金融"),
-    (("石油", "油", "神华", "中煤", "电力", "能源", "燃气", "煤气", "昆仑", "新奥", "新天", "北京控股"), "能源"),
-    (("移动", "联通", "电信"), "电信服务"),
-    (("腾讯", "阿里", "京东", "美团", "快手", "小米", "百度", "网易", "哔哩", "携程", "微盟"), "互联网"),
-    (("汽车", "长城", "吉利", "比亚迪", "广汽", "理想", "蔚来", "小鹏", "恒大", "赣锋", "锂业"), "汽车/新能源"),
-    (("医药", "生物", "制药", "石药", "药明", "百济", "君实", "丽珠", "白云山", "国药", "复星医药", "锦欣", "生殖"), "医药健康"),
-    (("啤酒", "乳业", "蒙牛", "康师傅", "旺旺", "海底捞", "颐海", "农夫", "安踏", "李宁", "雅迪", "敏华", "恒安", "海尔", "食品", "饮料"), "消费/食品饮料"),
-    (("地产", "置业", "发展", "长实", "恒基", "太古", "九龙仓", "龙湖", "碧桂园", "万科", "华润置地", "嘉里"), "房地产"),
-    (("矿业", "铝业", "黄金", "铜业", "有色", "宏桥"), "材料/矿业"),
-    (("中远", "航空", "国泰", "国航", "南方航空", "港铁", "物流", "港口"), "交通运输/物流"),
-    (("中铁", "铁建", "交通建设", "中车", "思捷"), "工业/基建"),
-    (("半导体", "中芯", "华虹", "舜宇", "瑞声", "比亚迪电子", "ASMPT", "光学"), "半导体/电子"),
-    (("软件", "金蝶", "金山"), "软件服务"),
-    (("银河娱乐", "金沙"), "博彩"),
-    (("中电控股", "中华煤气"), "公用事业"),
-]
+def _em_announcement(symbol, market):
+    """EastMoney announcement API for HK/US. Returns raw item list or []."""
+    try:
+        secid = f"116.{symbol.zfill(5)}" if market == "HK" else f"105.{symbol}"
+        url = "https://np-anotice-stock.eastmoney.com/api/v1/notice/get"
+        params = {
+            "sr": "-1", "page_size": "12", "page_index": "1",
+            "ann_type": "0,1,2,3", "client_source": "web", "secid": secid,
+        }
+        resp = _http_get(url, params=params,
+                         headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+        data = resp.json()
+        return data.get("data", {}).get("list", []) or []
+    except Exception as e:
+        print(f"[news_ann] {symbol} failed: {e}")
+        return []
+
+
+def _parse_em_news_item(item):
+    """Map a raw EastMoney news/announcement item to the event dict shape."""
+    title = re.sub(r"</?em>", "", item.get("title", "") or "")
+    pub_time = str(item.get("date", "") or "")[:10]
+    source = item.get("mediaName", "") or item.get("source", "") or ""
+    code = item.get("code", "") or ""
+    url = f"http://finance.eastmoney.com/a/{code}.html" if code else ""
+    pos_score = sum(w for kw, w in POS_KW if kw in title)
+    neg_score = sum(w for kw, w in NEG_KW if kw in title)
+    if pos_score > neg_score:
+        sent, ss = "positive", min(pos_score - neg_score, 5)
+    elif neg_score > pos_score:
+        sent, ss = "negative", min(neg_score - pos_score, 5)
+    else:
+        sent, ss = "neutral", 0
+    return {"date": pub_time, "title": title, "type": source or "新闻",
+            "url": url, "sentiment": sent, "sentiment_score": ss}
+
+
+def _get_market_news(code, market):
+    """News/events for HK/US via EastMoney HTTP (no akshare, Vercel-safe).
+    Chain: 1 EM search by code -> 2 EM search by name -> 3 EM announcement."""
+    symbol = code.replace(".HK", "").replace(".US", "")
+    info = get_stock_info(code, market) or {}
+    name = info.get("股票简称", "") or ""
+
+    items = _em_news_search(symbol)            # 1 by code
+    if not items and name:
+        items = _em_news_search(name)          # 2 by name
+    if not items:
+        items = _em_announcement(symbol, market)  # 3 announcement
+
+    if not items:
+        return []
+
+    events = []
+    seen = set()
+    for it in items[:15]:
+        ev = _parse_em_news_item(it)
+        key = ev["title"][:30]
+        if key in seen:
+            continue
+        seen.add(key)
+        events.append(ev)
+    return events
+
+
+
 
 def _infer_hk_industry(name):
     """Infer HK industry from the Chinese company name (no network/akshare)."""

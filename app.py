@@ -4913,67 +4913,86 @@ def _get_market_news(code, market):
         return []
 
 
+# HK industry inference from the curated name (no akshare; Vercel-safe).
+# Each rule returns a label that contains a _SECTOR_MAP key so _coarse_sector()
+# maps it back to the same sector taxonomy the candidate pool uses.
+_HK_INDUSTRY_RULES = [
+    (("银行",), "银行"),
+    (("保险",), "保险"),
+    (("交易所", "复星国际", "众安在线"), "综合金融"),
+    (("石油", "油", "神华", "中煤", "电力", "能源", "燃气", "煤气", "昆仑", "新奥", "新天", "北京控股"), "能源"),
+    (("移动", "联通", "电信"), "电信服务"),
+    (("腾讯", "阿里", "京东", "美团", "快手", "小米", "百度", "网易", "哔哩", "携程", "微盟"), "互联网"),
+    (("汽车", "长城", "吉利", "比亚迪", "广汽", "理想", "蔚来", "小鹏", "恒大", "赣锋", "锂业"), "汽车/新能源"),
+    (("医药", "生物", "制药", "石药", "药明", "百济", "君实", "丽珠", "白云山", "国药", "复星医药", "锦欣", "生殖"), "医药健康"),
+    (("啤酒", "乳业", "蒙牛", "康师傅", "旺旺", "海底捞", "颐海", "农夫", "安踏", "李宁", "雅迪", "敏华", "恒安", "海尔", "食品", "饮料"), "消费/食品饮料"),
+    (("地产", "置业", "发展", "长实", "恒基", "太古", "九龙仓", "龙湖", "碧桂园", "万科", "华润置地", "嘉里"), "房地产"),
+    (("矿业", "铝业", "黄金", "铜业", "有色", "宏桥"), "材料/矿业"),
+    (("中远", "航空", "国泰", "国航", "南方航空", "港铁", "物流", "港口"), "交通运输/物流"),
+    (("中铁", "铁建", "交通建设", "中车", "思捷"), "工业/基建"),
+    (("半导体", "中芯", "华虹", "舜宇", "瑞声", "比亚迪电子", "ASMPT", "光学"), "半导体/电子"),
+    (("软件", "金蝶", "金山"), "软件服务"),
+    (("银河娱乐", "金沙"), "博彩"),
+    (("中电控股", "中华煤气"), "公用事业"),
+]
+
+def _infer_hk_industry(name):
+    """Infer HK industry from the Chinese company name (no network/akshare)."""
+    if not name:
+        return "其他"
+    for kws, ind in _HK_INDUSTRY_RULES:
+        for kw in kws:
+            if kw in name:
+                return ind
+    return "其他"
+
 def _get_market_industry(code, market):
-    """Industry/peers/dividends for HK/US via AKShare (free, no key)."""
-    cfg = MARKET_CONFIG.get(market, {})
+    """Industry/peers/dividends for HK/US. Name-inference based (no akshare; Vercel-safe).
+
+    The previous version imported akshare for HK company profile + dividends. akshare
+    is heavy and not in requirements.txt, so it fails on Vercel (ImportError -> empty
+    industry). We now infer the industry from the curated stock name (always available),
+    which is also what the candidate pool uses for sector grouping, so peers still align.
+    Dividends are left empty (graceful) -- same soft-gap pattern already used for US.
+    """
     result = {
         "industry_name": "", "board_name": "", "board_code": "",
         "dividends": [],
-        "latest_dividend": {"date": "", "cash_per_share": 0, "dividend_ratio": 0},
+        "latest_dividend": None,
     }
     symbol = code.replace(".SZ", "").replace(".SH", "").replace(".BJ", "").replace(".HK", "").replace(".US", "")
 
+    # 1) Prefer the curated-list name (always available, no network call)
+    name = ""
     try:
-        import akshare as ak
-
-        # HK: Get industry from company profile
-        if market == "HK":
-            try:
-                df = ak.stock_hk_company_profile_em(symbol=symbol)
-                if not df.empty:
-                    result["industry_name"] = df.iloc[0].get("所属行业", "") or ""
-                    result["board_name"] = result["industry_name"]
-            except Exception as e:
-                print(f"[industry] HK profile failed: {e}", flush=True)
-        else:
-            # US: Use a simplified industry mapping from stock name
-            # Get spot data for name-based industry inference
+        from hk_us_list import HK_US_STOCKS
+        for c, n in HK_US_STOCKS.get(market, []):
+            if c == symbol:
+                name = n
+                break
+    except Exception:
+        pass
+    # 2) Fall back to Tencent spot name if the curated list missed
+    if not name:
+        try:
             info = get_stock_info(code, market)
-            name = info.get("股票简称", "") if info else ""
-            result["industry_name"] = _infer_us_industry(name)
-            result["board_name"] = result["industry_name"]
+            name = (info.get("股票简称", "") or info.get("name", "") or "")
+        except Exception:
+            pass
 
-        # Get dividends (HK only via AKShare)
+    # 3) Infer industry
+    try:
         if market == "HK":
-            try:
-                div_df = ak.stock_hk_dividend_payout_em(symbol=symbol)
-                if div_df is not None and not div_df.empty:
-                    for _, drow in div_df.head(5).iterrows():
-                        ex_date = str(drow.get("除净日", "") or "")[:10]
-                        scheme = str(drow.get("分红方案", "") or "")
-                        # Try to parse cash per share from scheme text like "每股派港币5.3元"
-                        cash = 0
-                        import re
-                        m = re.search(r'每股派.*?([\d.]+)\s*[元]', scheme)
-                        if m: cash = float(m.group(1))
-                        result["dividends"].append({
-                            "ex_date": ex_date, "cash_per_share": cash,
-                            "dividend_ratio": 0,
-                        })
-                    if result["dividends"]:
-                        d0 = result["dividends"][0]
-                        result["latest_dividend"] = {
-                            "date": d0["ex_date"],
-                            "cash_per_share": d0["cash_per_share"],
-                            "dividend_ratio": d0["dividend_ratio"],
-                        }
-            except Exception as e:
-                print(f"[dividend] HK failed: {e}", flush=True)
-
-        print(f"[industry] {code}: industry={result['industry_name']}, dividends={len(result['dividends'])}", flush=True)
+            result["industry_name"] = _infer_hk_industry(name)
+        else:
+            result["industry_name"] = _infer_us_industry(name)
+        result["board_name"] = result["industry_name"]
     except Exception as e:
-        print(f"[industry] Failed for {code}: {e}", flush=True)
+        print(f"[industry] infer failed for {code}: {e}", flush=True)
 
+    # 4) Dividends: intentionally empty on Vercel (akshare-based source removed).
+    #    latest_dividend stays None; downstream treats missing dividends gracefully.
+    print(f"[industry] {code}: industry={result['industry_name']}, name={name}", flush=True)
     return result
 
 
@@ -5003,7 +5022,6 @@ _US_INDUSTRY_MAP = {
     "奈飞": "传媒娱乐", "netflix": "传媒娱乐",
 }
 _US_GENERIC_INDUSTRY = "科技"  # default for US
-
 
 def _infer_us_industry(name):
     """Infer US stock industry from Chinese name."""

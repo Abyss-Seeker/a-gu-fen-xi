@@ -7,6 +7,7 @@ venv/
 
 # 本地临时/诊断脚本（不进版本库）
 diag.py
-hk_us_list.py
 run8899.py
 test_search.py
+# 注意：hk_us_list.py 是 HK/US 核心依赖（被多函数 import），必须随仓库部署，不能 ignore
+

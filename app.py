@@ -1739,6 +1739,7 @@ def analyze_stock(code):
     prices_data = get_price_history(code, days=250, market=market)
     money_flow = get_money_flow(code) if market == "A" else _get_market_money_flow(code, market, prices_data)
     news = get_news_events(code) if market == "A" else _get_market_news(code, market)
+    _flag_buyback_anomaly(news)  # tag buyback records with abnormal (out-of-scale) amounts
     industry_data = get_industry_data(code) if market == "A" else _get_market_industry(code, market)
 
     # Adjust money_flow warning for non-A markets
@@ -5010,6 +5011,66 @@ def _parse_em_news_item(item):
         sent, ss = "neutral", 0
     return {"date": pub_time, "title": title, "type": source or "新闻",
             "url": url, "sentiment": sent, "sentiment_score": ss}
+
+
+def _flag_buyback_anomaly(events):
+    """Flag buyback events whose amount is an order of magnitude off from peers.
+
+    Upstream announcement text sometimes carries a unit/scale data-entry error
+    (e.g. a HK$12.73M line among a series of HK$500M buybacks). We can't fix the
+    source, so we parse the amount out of each buyback title, compare against the
+    peer median, and attach an 'anomaly_note' to any record that is <=1/10 of it.
+    Mutates events in place. Pure text parsing -> Vercel-safe, no network.
+    """
+    if not events:
+        return events
+    import re as _re
+
+    def _amount_wan(title):
+        """Parse a buyback cash amount from the title, normalized to 万 (0.01M)."""
+        # 亿 first (斥资/耗资/涉资/动用 约 X 亿 港/美/元)
+        m = _re.search(r'(?:耗资|涉资|斥资|动用|共|合计)?\s*(?:约)?\s*'
+                       r'([\d,.]+)\s*亿\s*(?:港|美|元)', title)
+        if m:
+            try:
+                return float(m.group(1).replace(",", "")) * 10000.0
+            except ValueError:
+                return None
+        # 万 (note: "X万股" won't match because we require a currency word after 万)
+        m = _re.search(r'(?:耗资|涉资|斥资|动用|共|合计)?\s*(?:约)?\s*'
+                       r'([\d,.]+)\s*万\s*(?:港|美|元)', title)
+        if m:
+            try:
+                return float(m.group(1).replace(",", ""))
+            except ValueError:
+                return None
+        return None
+
+    buybacks = []
+    for ev in events:
+        title = ev.get("title", "") or ""
+        if "回购" not in title and "购回" not in title:
+            continue
+        amt = _amount_wan(title)
+        if amt and amt > 0:
+            buybacks.append((ev, amt))
+
+    if len(buybacks) < 3:
+        return events  # too few peers to judge a magnitude outlier reliably
+
+    amts = sorted(a for _, a in buybacks)
+    n = len(amts)
+    median = amts[n // 2] if n % 2 else (amts[n // 2 - 1] + amts[n // 2]) / 2.0
+    if median <= 0:
+        return events
+
+    for ev, amt in buybacks:
+        if amt < median * 0.1:  # an order of magnitude below the peer median
+            ev["anomaly_note"] = (
+                f"回购金额量级异常：本次约{amt:.0f}万，同期多为{median:.0f}万级，"
+                "疑似上游公告单位/量级录入异常，建议核对公告原文"
+            )
+    return events
 
 
 def _get_market_news(code, market):

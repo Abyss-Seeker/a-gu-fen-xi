@@ -861,12 +861,16 @@
         const titleHtml = evtUrl
           ? `<a href="${evtUrl}" target="_blank" rel="noopener" class="event-title-link" title="点击查看公告原文">${e.title || ''}</a>`
           : `<span class="event-title">${e.title || ''}</span>`;
+        const anomalyHtml = e.anomaly_note
+          ? `<div class="event-anomaly" style="color:#ff4444;font-weight:bold;font-size:0.76rem;margin-top:2px">⚠️ ${e.anomaly_note}</div>`
+          : '';
         return `<div class="event-item ${e.sentiment}">
           <span class="event-icon">${icon}</span>
           <span class="event-date">${e.date || ''}</span>
           ${titleHtml}
           ${sScore > 0 ? `<span class="event-weight">权重:${sScore}</span>` : ''}
           ${evtUrl ? `<a href="${evtUrl}" target="_blank" rel="noopener" class="event-ext-link" title="查看原文">🔗</a>` : ''}
+          ${anomalyHtml}
         </div>`;
       }).join('');
     }
@@ -888,11 +892,15 @@
             const keTitleHtml = keUrl
               ? `<a href="${keUrl}" target="_blank" rel="noopener" class="event-title-link" title="点击查看公告原文"><b>${e.title || ''}</b></a>`
               : `<span class="event-title"><b>${e.title || ''}</b></span>`;
+            const keAnomalyHtml = e.anomaly_note
+              ? `<div class="event-anomaly" style="color:#ff4444;font-weight:bold;font-size:0.76rem;margin-top:2px">⚠️ ${e.anomaly_note}</div>`
+              : '';
             return `<div class="event-item ${e.sentiment}" style="background:#f8f9fa;border-radius:6px;padding:6px 10px;margin:4px 0">
             <span class="event-icon">${e.sentiment === 'positive' ? '🟢' : '🔴'}</span>
             <span class="event-date">${e.date || ''}</span>
             ${keTitleHtml}
             ${keUrl ? `<a href="${keUrl}" target="_blank" rel="noopener" class="event-ext-link" title="查看原文">🔗</a>` : ''}
+            ${keAnomalyHtml}
           </div>`;
           }).join('')}
         </div>

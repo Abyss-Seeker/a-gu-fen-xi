@@ -439,6 +439,24 @@ def get_price_history(code, days=250, market="A"):
     try:
         result = api_fallback.em_get_price_history(code, 8000, market=market)
         if result and len(result) >= 10:
+            # HK/US: EastMoney uses fqt=2 (后复权) which inflates prices for
+            # high-dividend/split-heavy stocks (e.g. Tencent recent close ~2600 vs
+            # real ~460). Rescale the whole series so the latest close matches
+            # the real-time spot price, so moving averages align with the
+            # displayed price. A-share keeps fqt=1 (already correct).
+            if market in ("HK", "US"):
+                try:
+                    spot = get_stock_info(code, market).get("最新价") or 0
+                    last_c = result[-1].get("收盘") or 0
+                    if spot and last_c and abs(last_c - spot) / spot > 0.01:
+                        f = spot / last_c
+                        for b in result:
+                            b["开盘"] = round(b["开盘"] * f, 3)
+                            b["收盘"] = round(b["收盘"] * f, 3)
+                            b["最高"] = round(b["最高"] * f, 3)
+                            b["最低"] = round(b["最低"] * f, 3)
+                except Exception as e:
+                    print(f"[get_price_history] HK/US rescale skip: {e}")
             print(f"[get_price_history] EastMoney({market}): {len(result)} klines for {code}")
             cache_set(cache_key, result)
             return result
@@ -1755,7 +1773,17 @@ def analyze_stock(code):
     # ---- Basic Info ----
     price = info.get("最新价", 0)
     pe = info.get("市盈率-动态", 0)
-    pb = info.get("市净率", 0)
+    pb = info.get("市净率", 0) or 0
+    # HK/US: Tencent quote 市净率 field is mis-aligned (returns ~5.3 for
+    # Tencent vs real ~3.3). Prefer BPS from EastMoney financials (Vercel-safe).
+    if market in ("HK", "US"):
+        try:
+            _inc0 = (financial.get("income") or [])[0]
+            _bps = _inc0.get("每股净资产") or 0
+            if isinstance(_bps, (int, float)) and _bps > 0 and price > 0:
+                pb = round(price / float(_bps), 2)
+        except Exception:
+            pass
     total_mv = info.get("总市值", 0)
     circ_mv = info.get("流通市值", 0)
     change_pct = info.get("涨跌幅", 0)
@@ -5084,6 +5112,64 @@ def _infer_hk_industry(name):
                 return ind
     return "其他"
 
+
+def _em_hk_dividend(symbol):
+    """Fetch latest HK cash dividend per share from EastMoney F10 (Vercel-safe).
+
+    The Tencent quote feed does not expose dividend yield for HK stocks, so the
+    report used to show 0.00% even for high-yield names like Tencent. This hits
+    EastMoney's datacenter API (no akshare dependency) and parses the cash amount
+    out of the PLAN_EXPLAIN text, e.g. "每股派港币5.3元" -> 5.3.
+    Returns {"cash_per_share": float, "ex_date": "YYYY-MM-DD"|"", "year": ""} or None.
+    """
+    try:
+        import re as _re
+        params = {
+            "reportName": "RPT_HKF10_MAIN_DIVBASIC",
+            "columns": "SECURITY_CODE,UPDATE_DATE,REPORT_TYPE,EX_DIVIDEND_DATE,DIVIDEND_DATE,"
+                       "TRANSFER_END_DATE,YEAR,PLAN_EXPLAIN,IS_BFP",
+            "filter": f'(SECURITY_CODE="{symbol}")(IS_BFP="0")',
+            "pageNumber": "1", "pageSize": "10",
+            "sortTypes": "-1,-1", "sortColumns": "NOTICE_DATE,EX_DIVIDEND_DATE",
+            "source": "F10", "client": "PC", "v": "035584639294227527",
+        }
+        resp = _http_get(EM_DATACENTER, params=params, timeout=15)
+        data = resp.json()
+        rows = (data.get("result") or {}).get("data") or []
+
+        def _parse_cash(plan):
+            if not plan:
+                return 0.0
+            # 1) Prefer the explicit HKD-equivalent note, e.g.
+            #    "每股派美元0.13125元(相当于港币1.027545元(计算值))"
+            m = _re.search(r'相当于港币\s*([\d.]+)\s*元', plan)
+            if m:
+                return float(m.group(1))
+            # 2) Direct per-share HKD/RMB, e.g. "每股派港币5.3元" /
+            #    "每股派人民币0.5元". The currency word is 1-2 chars -> use +.
+            m = _re.search(r'每股派[港币人民]+\s*([\d.]+)\s*元', plan)
+            if m:
+                return float(m.group(1))
+            # 3) 10-share variant, e.g. "每10股派港币3.4元"
+            m = _re.search(r'每10股派[港币人民]+\s*([\d.]+)\s*港元', plan)
+            if m:
+                return float(m.group(1)) / 10.0
+            return 0.0
+
+        for r in rows:
+            cash = _parse_cash(r.get("PLAN_EXPLAIN", ""))
+            if cash > 0:
+                return {
+                    "cash_per_share": cash,
+                    "ex_date": (r.get("EX_DIVIDEND_DATE") or "")[:10],
+                    "year": r.get("YEAR", ""),
+                }
+        return None
+    except Exception as e:
+        print(f"[hk_dividend] fail {e}", flush=True)
+        return None
+
+
 def _get_market_industry(code, market):
     """Industry/peers/dividends for HK/US. Name-inference based (no akshare; Vercel-safe).
 
@@ -5091,7 +5177,9 @@ def _get_market_industry(code, market):
     is heavy and not in requirements.txt, so it fails on Vercel (ImportError -> empty
     industry). We now infer the industry from the curated stock name (always available),
     which is also what the candidate pool uses for sector grouping, so peers still align.
-    Dividends are left empty (graceful) -- same soft-gap pattern already used for US.
+    HK cash dividend (per share) is fetched from EastMoney F10 so the report's
+    dividend yield is real instead of 0.00%. US keeps the soft-gap (no US ticker
+    match) so latest_dividend stays None and yield reads 0 gracefully.
     """
     result = {
         "industry_name": "", "board_name": "", "board_code": "",
@@ -5128,8 +5216,22 @@ def _get_market_industry(code, market):
     except Exception as e:
         print(f"[industry] infer failed for {code}: {e}", flush=True)
 
-    # 4) Dividends: intentionally empty on Vercel (akshare-based source removed).
-    #    latest_dividend stays None; downstream treats missing dividends gracefully.
+    # 4) Dividends: HK cash dividend per share via EastMoney F10 (Vercel-safe,
+    #    no akshare). US keeps the soft-gap (EastMoney HK report won't match US
+    #    tickers) so latest_dividend stays None and downstream yields 0 gracefully.
+    if market == "HK" and symbol:
+        try:
+            div = _em_hk_dividend(symbol)
+            if div and div.get("cash_per_share", 0) > 0:
+                result["latest_dividend"] = {
+                    "cash_per_share": div["cash_per_share"],
+                    "ex_date": div.get("ex_date", ""),
+                    "year": div.get("year", ""),
+                }
+                result["dividends"] = [result["latest_dividend"]]
+                print(f"[industry] {code}: dividend HK$ {div['cash_per_share']} ex {div.get('ex_date','')}", flush=True)
+        except Exception as e:
+            print(f"[industry] {code}: dividend fetch skipped: {e}", flush=True)
     print(f"[industry] {code}: industry={result['industry_name']}, name={name}", flush=True)
     return result
 

@@ -903,6 +903,11 @@ def analyze_stock(code):
 
     symbol = code.replace(".SZ", "").replace(".SH", "").replace(".BJ", "")
 
+    # main 分支仅支持 A 股（无 HK/US 适配），market 恒为 "A"。
+    # beta 上 analyze_stock(code, market) 以参数传入；此处补齐变量定义，
+    # 否则下方 `if market == "A":` 会因 NameError 触发 500。
+    market = "A"
+
     # ---- Init warnings list for fallback tracking ----
     warnings = []
 

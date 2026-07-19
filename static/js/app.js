@@ -392,7 +392,7 @@
           <div class="stat-grid">
             <div class="stat-item"><div class="stat-label">最新股价</div><div class="stat-value">${price.toFixed(2)} 元</div></div>
             <div class="stat-item"><div class="stat-label">涨跌幅</div><div class="stat-value ${r.change_pct >= 0 ? 'trend-up' : 'trend-down'}">${r.change_pct > 0 ? '+' : ''}${r.change_pct.toFixed(2)}%</div></div>
-            <div class="stat-item"><div class="stat-label">PE(TTM)</div><div class="stat-value">${pe > 0 ? pe.toFixed(2) : '亏损'}</div></div>
+            <div class="stat-item"><div class="stat-label">市盈率(动)</div><div class="stat-value">${pe > 0 ? pe.toFixed(2) : '亏损'}</div></div>
             <div class="stat-item"><div class="stat-label">PB</div><div class="stat-value">${pb.toFixed(2)}</div></div>
             <div class="stat-item"><div class="stat-label">总市值</div><div class="stat-value">${totalMv} 亿</div></div>
             <div class="stat-item"><div class="stat-label">流通市值</div><div class="stat-value">${circMv} 亿</div></div>
@@ -1847,7 +1847,7 @@
 
     let finCompRows = '';
     const finCompare = [
-      { label: 'PE (TTM)', altVal: altPE > 0 ? altPE.toFixed(1) : '亏损', curVal: curPE > 0 ? curPE.toFixed(1) : '亏损', unit: '', lowerBetter: true },
+      { label: '市盈率(动)', altVal: altPE > 0 ? altPE.toFixed(1) : '亏损', curVal: curPE > 0 ? curPE.toFixed(1) : '亏损', unit: '', lowerBetter: true },
       { label: 'PB', altVal: altPB.toFixed(2), curVal: curPB.toFixed(2), unit: '', lowerBetter: true },
       { label: 'ROE', altVal: altROE > 0 ? altROE.toFixed(1) + '%' : '--', curVal: curROE > 0 ? curROE.toFixed(1) + '%' : '--', unit: '', lowerBetter: false },
       { label: '股息率', altVal: altDiv > 0 ? altDiv.toFixed(2) + '%' : '--', curVal: curDiv > 0 ? curDiv.toFixed(2) + '%' : '--', unit: '', lowerBetter: false },

@@ -423,6 +423,7 @@ def get_financial_data(code):
                 "营业总收入": r.get("TOTAL_OPERATE_INCOME"),
                 "归母净利润": r.get("PARENT_NETPROFIT"),
                 "基本每股收益": r.get("BASIC_EPS"),
+                "每股净资产": r.get("BPS"),
                 "加权ROE": r.get("WEIGHTAVG_ROE"),
             })
 
@@ -602,7 +603,7 @@ def get_news_events(code):
         # Weighted keywords: (keyword, weight) where weight is importance
         positive_kw = [
             ("重大资产重组", 5), ("借壳上市", 5), ("摘帽", 5), ("业绩大涨", 4),
-            ("增持", 3), ("回购", 3), ("股权激励", 3), ("中标", 3),
+            ("增持", 3), ("回购完成", 4), ("回购实施结果", 4), ("回购股份实施", 4), ("回购注销", 4), ("股份注销", 3), ("回购", 3), ("股权激励", 3), ("中标", 3),
             ("战略合作", 3), ("签署重大合同", 3), ("获得订单", 3),
             ("高分红", 3), ("高送转", 2), ("派息", 2), ("权益分派", 2), ("分红", 2),
             ("业绩预增", 3), ("业绩预告.*增长", 3), ("扭亏为盈", 4),
@@ -741,8 +742,15 @@ def get_industry_data(code):
 # ---------- Analysis Functions ----------
 
 # Industry-specific PE/PB benchmark ranges (CSRC industry classification)
-def _industry_pe_range(industry_name):
-    """Return (low, high, pb_low, pb_high, roe_avg, roe_good) for given industry."""
+def _industry_pe_range(industry_name, board_name=None):
+    """Return (low, high, pb_low, pb_high, roe_avg, roe_good) for given industry.
+
+    Matches on BOTH industry_name (e.g. "制造业-酒、饮料和精制茶制造业")
+    and board_name (e.g. "白酒Ⅱ"). Some A-share industry_name strings do NOT
+    contain the short keyword (e.g. 白酒), but board_name does -- previously this
+    fell through to the generic default (pb_high=4.0) and wrongly flagged high-PB
+    names like 茅台 as "PB偏高".
+    """
     mapping = {
         "金融":    {"low": 5,  "high": 15, "pb_low": 0.5, "pb_high": 2.0, "roe_avg": 8,  "roe_good": 12},
         "银行":    {"low": 4,  "high": 10, "pb_low": 0.3, "pb_high": 1.5, "roe_avg": 8,  "roe_good": 12},
@@ -775,12 +783,55 @@ def _industry_pe_range(industry_name):
         "农业":    {"low": 10, "high": 30, "pb_low": 1.0, "pb_high": 4.0, "roe_avg": 5,  "roe_good": 10},
         "环保":    {"low": 12, "high": 30, "pb_low": 1.0, "pb_high": 3.5, "roe_avg": 6,  "roe_good": 12},
     }
-    # Match by keyword
+    # Match by keyword (industry_name OR board_name)
+    _search = f"{industry_name or ''} {board_name or ''}"
     for key, val in mapping.items():
-        if key in industry_name:
+        if key in _search:
             return val
     # Default: general industry
     return {"low": 10, "high": 30, "pb_low": 1.0, "pb_high": 4.0, "roe_avg": 8, "roe_good": 15}
+
+
+def _a_share_pe_pb(financial, price):
+    """A-share PE(动态) & PB from EastMoney QUARTERLY financials (own data, no extra deps).
+
+    PB uses the LATEST reported-quarter BPS (RPT_LICO_FN_CPD raw `BPS`),
+    which matches 同花顺 caliber (latest-quarter BPS). The quote's 市净率
+    field[46] is stale/higher (annual-ish BPS) and understates PB.
+
+    PE(动态) = price / (latest-quarter STANDALONE EPS * 4). Quarterly
+    BASIC_EPS in RPT_LICO_FN_CPD is cumulative YTD, so standalone =
+    diff vs prior quarter (Q1 is standalone by definition). This matches
+    同花顺 市盈率(动) exactly (e.g. 茅台 14.4 vs 同花顺 14.37).
+
+    Returns (pe, pb); either may be None if not computable -> caller keeps fallback.
+    """
+    pe = None
+    pb = None
+    try:
+        q = [x for x in (financial.get("quarterly") or []) if x.get("报告期")]
+        q.sort(key=lambda x: x["报告期"], reverse=True)
+        if q and price > 0:
+            # PB from latest-quarter BPS
+            _bps = q[0].get("每股净资产") or 0
+            if isinstance(_bps, (int, float)) and _bps > 0:
+                pb = round(price / float(_bps), 2)
+            # PE(动态) from latest-quarter standalone EPS annualized
+            _lm = int(str(q[0]["报告期"])[5:7] or 0)  # month: 3/6/9
+            _eps = float(q[0].get("基本每股收益") or 0)
+            _dyn = 0.0
+            if _eps > 0:
+                if _lm == 3:
+                    _dyn = _eps * 4
+                elif _lm in (6, 9) and len(q) >= 2:
+                    _prev = float(q[1].get("基本每股收益") or 0)
+                    _dyn = (_eps - _prev) * 4
+                # Q4 is in annual (income), not quarterly -> skip
+            if _dyn > 0:
+                pe = round(price / _dyn, 2)
+    except Exception as e:
+        print(f"[_a_share_pe_pb] skip: {e}", flush=True)
+    return pe, pb
 
 
 def calc_ma(prices, window):
@@ -882,6 +933,17 @@ def analyze_stock(code):
     price = info.get("最新价", 0)
     pe = info.get("市盈率-动态", 0)
     pb = info.get("市净率", 0)
+    # A-share: recompute PE(动态) & PB from EastMoney QUARTERLY financials
+    # (own reliable data, no extra deps). Quote 市盈率-动态 uses annualized
+    # annual EPS (static-ish, ~18.9 for 茅台); quote 市净率 uses a
+    # stale/higher BPS. Quarterly BPS -> PB 5.79 (matches 同花顺),
+    # latest-quarter standalone EPS*4 -> PE(动态) 14.4 (matches 同花顺 动态).
+    if market == "A":
+        _ap = _a_share_pe_pb(financial, price)
+        if _ap[0]:
+            pe = _ap[0]
+        if _ap[1]:
+            pb = _ap[1]
     total_mv = info.get("总市值", 0)
     circ_mv = info.get("流通市值", 0)
     change_pct = info.get("涨跌幅", 0)
@@ -1288,7 +1350,7 @@ def analyze_stock(code):
         # PE-based industry assessment with industry-specific benchmarks
         # Different industries have different normal PE ranges
         ind_name = industry_data["industry_name"]
-        pe_range = _industry_pe_range(ind_name)
+        pe_range = _industry_pe_range(ind_name, industry_data.get("board_name"))
         ind_detail["pe_benchmark"] = pe_range
 
         if pe > 0:

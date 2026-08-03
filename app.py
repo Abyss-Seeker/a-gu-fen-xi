@@ -3416,6 +3416,7 @@ def _apply_profile_bonus(cand, profile):
       - mcap_bias: 'large' | 'mid' | 'small' | '' -- size-preference bonus
       - pe_tolerance: int (0 = ignore) -- PE below tolerance gets bonus
       - style_bias: 'value' | 'growth' | 'stable' | '' -- style-matching bonus
+      - price_band: 'low' | 'mid' | 'high' | '' -- preferred price band bonus
     Returns (bonus, reasons_list). Zero profile => (0, []) -- degrades to plain score.
     """
     if not profile:
@@ -3453,6 +3454,17 @@ def _apply_profile_bonus(cand, profile):
             b = min(int(w), 4) * 3
             bonus += b
             reasons.append("常看「" + (ind or "该行业") + "」")
+
+    # 1b. Price band preference (user's preferred price range)
+    price_band = profile.get('price_band', '')
+    if price_band:
+        p = cand.get('price') or 0
+        if p > 0:
+            cand_band = 'low' if p < 10 else ('mid' if p <= 50 else 'high')
+            if cand_band == price_band:
+                bonus += 3
+                band_label = {'low': '低价股(<10元)', 'mid': '中价股(10-50元)', 'high': '高价股(>50元)'}.get(price_band, price_band)
+                reasons.append(f"偏好{band_label}")
 
     # 2. Market cap bias
     mcap_bias = profile.get('mcap_bias', '')

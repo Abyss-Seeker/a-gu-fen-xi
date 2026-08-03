@@ -1332,3 +1332,7 @@ body {
   padding: 12px;
   font-style: italic;
 }
+
+/* Model fetch status (settings) */
+.model-status-ok { color: #22c55e; }
+.model-status-fail { color: #e74c3c; }

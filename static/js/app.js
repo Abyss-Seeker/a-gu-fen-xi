@@ -2846,9 +2846,122 @@
   });
 
   // ========== Settings Modal ==========
+  // ========== AI Provider Presets ==========
+  const PROVIDER_PRESETS = {
+    openai:      { base: 'https://api.openai.com/v1',                       model: 'gpt-4o-mini',             name: 'OpenAI' },
+    deepseek:    { base: 'https://api.deepseek.com/v1',                     model: 'deepseek-chat',            name: 'DeepSeek' },
+    siliconflow: { base: 'https://api.siliconflow.cn/v1',                   model: 'deepseek-ai/DeepSeek-V3',  name: '硅基流动' },
+    moonshot:    { base: 'https://api.moonshot.cn/v1',                      model: 'moonshot-v1-8k',           name: 'Kimi' },
+    zhipu:       { base: 'https://open.bigmodel.cn/api/paas/v4',            model: 'glm-4-flash',              name: '智谱GLM' },
+    qwen:        { base: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus',            name: '通义千问' },
+    groq:        { base: 'https://api.groq.com/openai/v1',                  model: 'llama-3.1-70b-versatile',  name: 'Groq' },
+    ollama:      { base: 'http://localhost:11434/v1',                       model: 'qwen2.5:7b',               name: '本地Ollama' },
+    custom:      { base: '',                                                model: '',                         name: '自定义' },
+  };
+
+  // System prompt templates (curated from finance-analysis conventions)
+  const PROMPT_TEMPLATES = {
+    professional: '你是一位专业的股票投资分析师，擅长基本面分析（ROE、PE/PB、现金流、行业格局）、技术面分析（均线、MACD、KDJ、量价关系）和投资策略。回答应专业、客观、结构清晰，包含：核心观点 → 论据（数据支撑）→ 风险提示。所有结论基于用户提供的公开数据，不构成投资建议。',
+    value: '你是一位价值投资分析师（格雷厄姆/巴菲特风格）。分析时优先关注：估值是否合理（PE/PB 分位）、盈利质量（ROE 稳定性、自由现金流）、安全边际、护城河与行业格局。倾向长期持有视角，对短期波动保持克制，明确指出高估/低估的依据。',
+    technical: '你是一位技术分析专家。擅长解读均线系统、MACD/KDJ/RSI 指标、K线形态、量价关系、支撑阻力位。回答时给出明确的技术信号判断（多头/空头/震荡），标注关键价位和止损位，提醒技术分析的局限性。',
+    plain: '你是一位能把复杂股市知识讲得通俗易懂的理财顾问。用生活化的比喻解释专业术语，避免堆砌数据。回答简短直接，先说结论再解释，适合投资新手理解。',
+  };
+
+  function applyProviderPreset() {
+    const provider = $('#apiProvider').value;
+    const preset = PROVIDER_PRESETS[provider] || PROVIDER_PRESETS.custom;
+    if (preset.base) $('#apiBase').value = preset.base;
+    if (preset.model) $('#apiModel').value = preset.model;
+    // Hide model list when provider changes
+    const wrap = $('#modelListWrap');
+    if (wrap) wrap.style.display = 'none';
+  }
+
+  async function fetchModels() {
+    const apiKey = $('#apiKey').value.trim();
+    const apiBase = $('#apiBase').value.trim();
+    const resultDiv = $('#testResult');
+    const wrap = $('#modelListWrap');
+    const select = $('#modelList');
+
+    if (!apiKey || apiKey.includes('****')) {
+      if (resultDiv) {
+        resultDiv.style.display = 'block';
+        resultDiv.className = 'test-result fail';
+        resultDiv.textContent = '❌ 请先输入完整的 API Key 再获取模型列表';
+      }
+      return;
+    }
+
+    if (wrap) wrap.style.display = 'none';
+    if (resultDiv) {
+      resultDiv.style.display = 'block';
+      resultDiv.className = 'test-result';
+      resultDiv.textContent = '⏳ 正在拉取模型列表...';
+    }
+
+    try {
+      const resp = await fetch('/api/models', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ api_key: apiKey, api_base: apiBase }),
+      });
+      const data = await resp.json();
+      if (data.models && data.models.length > 0) {
+        // Prefer chat-capable / text models
+        let models = data.models;
+        // Sort: recommended (contains common chat keywords) first, then alphabetical
+        const prio = (m) => {
+          const s = m.toLowerCase();
+          if (/gpt-4|deepseek|qwen|glm|moonshot|llama|claude/.test(s)) return 0;
+          if (/gpt|chat|instruct/.test(s)) return 1;
+          return 2;
+        };
+        models.sort((a, b) => prio(a) - prio(b) || a.localeCompare(b));
+        select.innerHTML = models.map(m => `<option value="${m}">${m}</option>`).join('');
+        wrap.style.display = 'block';
+        // Auto-select current model if present
+        const cur = $('#apiModel').value.trim();
+        if (cur && models.includes(cur)) select.value = cur;
+        if (resultDiv) {
+          resultDiv.className = 'test-result success';
+          resultDiv.textContent = '✅ 找到 ' + models.length + ' 个可用模型，请从下拉选择';
+        }
+      } else {
+        if (resultDiv) {
+          resultDiv.className = 'test-result fail';
+          resultDiv.textContent = '❌ ' + (data.error || '该提供商不支持模型列表接口（可手动输入模型名）');
+        }
+      }
+    } catch (err) {
+      if (resultDiv) {
+        resultDiv.className = 'test-result fail';
+        resultDiv.textContent = '❌ 拉取失败: ' + err.message;
+      }
+    }
+  }
+
   settingsBtn.addEventListener('click', () => openSettings());
   settingsOverlay.addEventListener('click', (e) => {
     if (e.target === settingsOverlay) closeSettings();
+  });
+
+  // Provider change → auto-fill base + model
+  $('#apiProvider').addEventListener('change', applyProviderPreset);
+  $('#fetchModelsBtn').addEventListener('click', fetchModels);
+  // Model list selection → fill model input
+  document.addEventListener('change', (e) => {
+    if (e.target && e.target.id === 'modelList') {
+      $('#apiModel').value = e.target.value;
+    }
+  });
+  // Prompt template buttons
+  document.addEventListener('click', (e) => {
+    const tplBtn = e.target.closest('.prompt-template');
+    if (tplBtn) {
+      const tpl = PROMPT_TEMPLATES[tplBtn.getAttribute('data-tpl')];
+      if (tpl) $('#systemPrompt').value = tpl;
+    }
   });
 
   async function openSettings() {

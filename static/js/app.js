@@ -26,8 +26,8 @@
     localStorage.setItem(HISTORY_KEY, JSON.stringify(h));
     renderHistoryBar();
   }
-  // Attach features (industry/mcap/pe) to history items for profile building
-  function enrichHistory(code, name, industry, mcap_yi, pe) {
+  // Attach features (industry/mcap/pe/price) to history items for profile building
+  function enrichHistory(code, name, industry, mcap_yi, pe, price) {
     let h = getHistory();
     let changed = false;
     h.forEach(item => {
@@ -36,6 +36,7 @@
         if (industry) item.industry = industry;
         if (mcap_yi) item.mcap_yi = mcap_yi;
         if (pe) item.pe = pe;
+        if (price) item.price = price;
         changed = true;
       }
     });
@@ -112,7 +113,7 @@
   }
 
   // Update watchlist item features after analysis (used for profile building)
-  function enrichWatchlist(code, name, industry, mcap_yi, pe) {
+  function enrichWatchlist(code, name, industry, mcap_yi, pe, price) {
     const fc = normalizeCode(code);
     if (!fc) return;
     const list = getWatchlist();
@@ -123,6 +124,7 @@
         if (industry) item.industry = industry;
         if (mcap_yi) item.mcap_yi = mcap_yi;
         if (pe) item.pe = pe;
+        if (price) item.price = price;
         item.ts = Date.now();
         changed = true;
       }
@@ -208,36 +210,71 @@
    * Industry names are matched by keyword against STATIC_PEERS categories
    * (the frontend learns them from analysis reports; fallback: keyword guess).
    */
+  /**
+   * Build user profile from the most recent N interactions (watchlist + history).
+   * Rules (per Itsuyo 2026-08-03):
+   *   - Only look at the most recent 10 interactions (time-decayed, no all-time bias)
+   *   - Industry weight needs >= 2 hits OR >= 20% share to count (one-off clicks
+   *     like a single 平安银行 must NOT pin the user to "常看银行")
+   *   - Also derive a preferred PRICE BAND (low/mid/high) from those interactions
+   *   - Cold start (<3 signals): fall back to the CURRENT stock's own features,
+   *     so recommendations lean toward same-industry / same-price-band stocks
+   */
   function buildUserProfile() {
-    const profile = { industry_weights: {}, mcap_bias: '', pe_tolerance: 0, style_bias: '' };
+    const profile = { industry_weights: {}, mcap_bias: '', pe_tolerance: 0, style_bias: '', price_band: '', _source: 'history' };
 
-    // Collect features from watchlist + history
+    // Collect features, newest first. Watchlist entries carry ts; history carries time.
     const stocks = [];
     getWatchlist().forEach(w => {
-      if (w.code) stocks.push({ code: w.code, name: w.name, industry: w.industry || '', mcap_yi: w.mcap_yi || 0, pe: w.pe || 0 });
+      if (w.code) stocks.push({ code: w.code, name: w.name, industry: w.industry || '', mcap_yi: w.mcap_yi || 0, pe: w.pe || 0, price: w.price || 0, ts: w.ts || 0 });
     });
-    getHistory().slice(0, 10).forEach(h => {
-      if (h.code) stocks.push({ code: h.code, name: h.name, industry: h.industry || '', mcap_yi: h.mcap_yi || 0, pe: h.pe || 0 });
+    getHistory().forEach(h => {
+      if (h.code) stocks.push({ code: h.code, name: h.name, industry: h.industry || '', mcap_yi: h.mcap_yi || 0, pe: h.pe || 0, price: h.price || 0, ts: h.ts || 0 });
     });
-    if (stocks.length === 0) return profile;
+    // Newest first: watchlist ts (ms) / history ts (ms if present, else 0 → older)
+    stocks.sort((a, b) => (b.ts || 0) - (a.ts || 0));
+    const recent = stocks.slice(0, 10);  // only most recent 10 interactions
 
-    // 1. Industry weights (count frequency, keyword-match to known categories)
+    // ---- Cold start: <3 signals → use current stock's own features ----
+    // (checked BEFORE the empty-return so zero history still gets a profile)
+    if (recent.length < 3 && currentReport) {
+      const cr = currentReport;
+      const indDetail = (cr.scores && cr.scores.industry && cr.scores.industry.detail) || {};
+      const boardRaw = indDetail.board_name || '';
+      const curInd = boardRaw
+        ? boardRaw.replace(/[ⅠⅡⅢⅣⅤ]+/g, '').replace(/行业$/, '').trim()
+        : (indDetail.industry_name || '');
+      const curMcap = cr.total_mv ? parseFloat(cr.total_mv) : 0;
+      const curPe = cr.pe ? parseFloat(cr.pe) : 0;
+      const curPrice = cr.price ? parseFloat(cr.price) : 0;
+      if (curInd) profile.industry_weights[curInd] = 3;  // lean toward same industry
+      if (curMcap >= 1000) profile.mcap_bias = 'large';
+      else if (curMcap >= 200) profile.mcap_bias = 'mid';
+      else if (curMcap > 0) profile.mcap_bias = 'small';
+      if (curPe > 0) profile.pe_tolerance = Math.max(15, Math.min(60, Math.round(curPe * 1.3)));
+      if (curPe > 0 && curPe <= 20) profile.style_bias = 'value';
+      else if (curPe > 30) profile.style_bias = 'growth';
+      else if (curMcap >= 1000) profile.style_bias = 'stable';
+      if (curPrice > 0) profile.price_band = _priceBandOf(curPrice);
+      profile._source = 'current-stock';
+      return profile;
+    }
+
+    // 1. Industry weights — need >=2 hits OR >=20% share
     const CATS = ['白酒','家电','银行','证券','保险','医药','电子','半导体','汽车','新能源','电力','食品','房地产','钢铁','煤炭','石油','化工','机械','纺织','通信','计算机','传媒','军工','环保','公用事业','交通运输','零售','旅游','农林','有色','建材','建筑'];
-    // Map long industry names to short categories (e.g. "制造业-酒、饮料和精制茶制造业" → "白酒")
     function shortCategory(name) {
       if (!name) return '';
       for (const cat of CATS) {
         if (name.includes(cat)) return cat;
       }
-      return name; // keep as-is if unknown
+      return name;
     }
     const indCount = {};
-    stocks.forEach(s => {
+    recent.forEach(s => {
       const ind = s.industry ? shortCategory(s.industry) : '';
       if (ind) {
         indCount[ind] = (indCount[ind] || 0) + 1;
       } else {
-        // keyword guess from name (coarse)
         for (const cat of CATS) {
           if (s.name && s.name.includes(cat.slice(0, 2))) {
             indCount[cat] = (indCount[cat] || 0) + 1;
@@ -246,13 +283,15 @@
         }
       }
     });
-    const total = stocks.length || 1;
+    const total = recent.length || 1;
     Object.entries(indCount).forEach(([k, v]) => {
-      if (v >= 1) profile.industry_weights[k] = Math.round((v / total) * 10); // 0-10 scale
+      if (v >= 2 && v / total >= 0.2) {
+        profile.industry_weights[k] = Math.min(10, Math.round((v / total) * 10));
+      }
     });
 
     // 2. Market cap bias (median mcap)
-    const mcaps = stocks.map(s => s.mcap_yi).filter(v => v > 0);
+    const mcaps = recent.map(s => s.mcap_yi).filter(v => v > 0);
     if (mcaps.length > 0) {
       mcaps.sort((a, b) => a - b);
       const med = mcaps[Math.floor(mcaps.length / 2)];
@@ -262,7 +301,7 @@
     }
 
     // 3. PE tolerance (median PE * 1.3, floor 15, cap 60)
-    const pes = stocks.map(s => s.pe).filter(v => v > 0);
+    const pes = recent.map(s => s.pe).filter(v => v > 0);
     if (pes.length > 0) {
       pes.sort((a, b) => a - b);
       const medPe = pes[Math.floor(pes.length / 2)];
@@ -276,7 +315,23 @@
     else if (medPe > 30) profile.style_bias = 'growth';
     else if (medMcap >= 1000) profile.style_bias = 'stable';
 
+    // 5. Preferred price band (median price of recent interactions)
+    const prices = recent.map(s => s.price).filter(v => v > 0);
+    if (prices.length > 0) {
+      prices.sort((a, b) => a - b);
+      const medPrice = prices[Math.floor(prices.length / 2)];
+      profile.price_band = _priceBandOf(medPrice);
+    }
+
     return profile;
+  }
+
+  // Price band helper: A股 rough bands — low <10元, mid 10~50元, high >50元
+  function _priceBandOf(price) {
+    if (!price || price <= 0) return '';
+    if (price < 10) return 'low';
+    if (price <= 50) return 'mid';
+    return 'high';
   }
 
   // Generate human-readable "why recommended for you" lines from profile
@@ -284,10 +339,17 @@
     const lines = [];
     const iw = profile.industry_weights || {};
     const topInds = Object.entries(iw).sort((a, b) => b[1] - a[1]).slice(0, 2).map(x => x[0]);
-    if (topInds.length) lines.push('你常看「' + topInds.join('」「') + '」');
+    if (profile._source === 'current-stock') {
+      lines.push('冷启动：基于你当前关注的股票');
+    } else if (topInds.length) {
+      lines.push('你常看「' + topInds.join('」「') + '」');
+    }
     if (profile.mcap_bias === 'large') lines.push('偏好大盘蓝筹');
     if (profile.mcap_bias === 'mid') lines.push('偏好中盘');
     if (profile.mcap_bias === 'small') lines.push('偏好中小盘');
+    if (profile.price_band === 'low') lines.push('偏好低价股(<10元)');
+    if (profile.price_band === 'mid') lines.push('偏好中价股(10-50元)');
+    if (profile.price_band === 'high') lines.push('偏好高价股(>50元)');
     if (profile.pe_tolerance) lines.push('PE≤' + profile.pe_tolerance + ' 可接受');
     if (profile.style_bias === 'value') lines.push('倾向低估值价值型');
     if (profile.style_bias === 'growth') lines.push('倾向成长型');
@@ -354,8 +416,9 @@
         : (indDetail.industry_name || '');
       const mcapYi = data.total_mv ? parseFloat(data.total_mv) : 0;
       const peV = data.pe ? parseFloat(data.pe) : 0;
-      enrichWatchlist(data.code, data.name, indName, mcapYi, peV);
-      enrichHistory(data.code, data.name, indName, mcapYi, peV);
+      const priceV = data.price ? parseFloat(data.price) : 0;
+      enrichWatchlist(data.code, data.name, indName, mcapYi, peV, priceV);
+      enrichHistory(data.code, data.name, indName, mcapYi, peV, priceV);
       loadAlternatives(code);
       window.scrollTo({ top: 0, behavior: 'smooth' });
     } catch (err) {

@@ -3173,14 +3173,16 @@ def _get_hk_us_pool(market):
     return pool
 
 
-def _hk_us_price_similar(code, market, symbol):
+def _hk_us_price_similar(code, market, symbol, price_range=0.15):
+    price_range = float(price_range or 0.15)
+    price_range = max(0.05, min(0.50, price_range))
     wc = f"hk{symbol}" if market == "HK" else f"us{symbol.upper()}"
     q = _batch_get_quotes_trusted([wc]).get(wc, {}) or {}
     price = _to_float(q.get("price"))
     if price <= 0:
         return []
     pool = _get_hk_us_pool(market)
-    lo, hi = price * 0.75, price * 1.25
+    lo, hi = price * (1 - price_range), price * (1 + price_range)
     in_range = [p for p in pool if p["code"] != symbol and p["price"] > 0 and lo <= p["price"] <= hi]
     if len(in_range) < 4:
         others = [p for p in pool if p["code"] != symbol and p["price"] > 0]
@@ -3190,7 +3192,7 @@ def _hk_us_price_similar(code, market, symbol):
             if p["code"] not in seen:
                 in_range.append(p)
                 seen.add(p["code"])
-            if len(in_range) >= 4:
+            if len(in_range) >= 12:
                 break
     for c in in_range:
         sr = _lightweight_score(c, context={"primary_price": price})
@@ -3198,10 +3200,11 @@ def _hk_us_price_similar(code, market, symbol):
         c["recommendation"] = sr["recommendation"]
         c["scores_breakdown"] = sr["breakdown"]
     in_range.sort(key=lambda x: x["total_score"], reverse=True)
-    return in_range[:4]
+    return in_range[:12]
 
 
-def _hk_us_recommended(code, market, symbol):
+def _hk_us_recommended(code, market, symbol, profile=None):
+    profile = profile or {}
     pool = _get_hk_us_pool(market)
     primary = next((p for p in pool if p["code"] == symbol), None)
     prim_sector = primary["sector"] if primary else "其他"
@@ -3213,8 +3216,18 @@ def _hk_us_recommended(code, market, symbol):
         c["scores_breakdown"] = sr["breakdown"]
         if c["sector"] == prim_sector:
             c["total_score"] -= 8  # diversify away from same sector
+        # Personalization bonus (industry via sector as a proxy)
+        c["profile_bonus"] = 0
+        c["profile_reasons"] = []
+        if profile:
+            cp = dict(c)
+            cp["industry"] = c.get("sector", "")
+            bonus, reasons = _apply_profile_bonus(cp, profile)
+            c["profile_bonus"] = bonus
+            c["profile_reasons"] = reasons
+            c["total_score"] = c["total_score"] + bonus
     cands.sort(key=lambda x: x["total_score"], reverse=True)
-    return cands[:4]
+    return cands[:12]
 
 
 def _hk_us_same_industry(code, market, symbol):
@@ -3265,22 +3278,26 @@ def _hk_us_same_industry(code, market, symbol):
     return peers[:6]
 
 
-def find_price_similar(code):
+def find_price_similar(code, price_range=0.15):
     """
-    Find stocks with similar price range (±25%).
+    Find stocks with similar price range (±price_range, default 15%).
     Multi-layer fallback for Vercel resilience:
-      1. Batch quotes → filter by price range ±25%
+      1. Batch quotes → filter by price range ±price_range
       2. If < 4 results, try individual Sina quotes for known candidates
       3. If still < 4, use price bracket presets from static pool
+
+    Returns top 12 candidates (paginated client-side as 4/page).
     """
-    cache_key = f"ps_{code}"
+    price_range = float(price_range or 0.15)
+    price_range = max(0.05, min(0.50, price_range))  # clamp 5% ~ 50%
+    cache_key = f"ps_{code}_{int(price_range * 100)}"
     cached_val = cached(cache_key, ttl=600)
     if cached_val:
         return cached_val
 
     market, symbol = detect_market(code)
     if market in ("HK", "US"):
-        res = _hk_us_price_similar(code, market, symbol)
+        res = _hk_us_price_similar(code, market, symbol, price_range)
         cache_set(cache_key, res)
         return res
 
@@ -3292,8 +3309,8 @@ def find_price_similar(code):
             return []
 
         symbol = code.replace('.SZ', '').replace('.SH', '').replace('.BJ', '')
-        lo = price * 0.75
-        hi = price * 1.25
+        lo = price * (1 - price_range)
+        hi = price * (1 + price_range)
 
         # ---- Layer 1: Static pool + batch quotes ----
         all_candidates = _get_all_candidate_codes()
@@ -3366,11 +3383,11 @@ def find_price_similar(code):
             cand['scores_breakdown'] = score_result['breakdown']
             cand['code_full'] = cand['code'] + ('.SH' if cand['wc'].startswith('sh') else '.SZ')
 
-        # Sort by score, take top 4
+        # Sort by score, take top 12 (paginated as 4/page client-side)
         in_range.sort(key=lambda x: x['total_score'], reverse=True)
-        result = in_range[:4]
+        result = in_range[:12]
 
-        print(f"[find_price_similar] Price range ¥{lo:.2f}-{hi:.2f}, returning {len(result)} candidates")
+        print(f"[find_price_similar] Price range ¥{lo:.2f}-{hi:.2f} (±{price_range*100:.0f}%), returning {len(result)} candidates")
         cache_set(cache_key, result)
         return result
 
@@ -3391,20 +3408,108 @@ def find_price_similar(code):
         return []
 
 
-def find_recommended(code):
+def _apply_profile_bonus(cand, profile):
     """
-    Find comprehensive recommended stocks across all industries.
-    Uses static stock pool + batch quotes + lightweight scoring.
+    Apply user-profile personalization bonus to a candidate's score.
+    profile (dict, from frontend localStorage-derived parameters):
+      - industry_weights: {industry: weight} -- hit adds bonus (weight * 3)
+      - mcap_bias: 'large' | 'mid' | 'small' | '' -- size-preference bonus
+      - pe_tolerance: int (0 = ignore) -- PE below tolerance gets bonus
+      - style_bias: 'value' | 'growth' | 'stable' | '' -- style-matching bonus
+    Returns (bonus, reasons_list). Zero profile => (0, []) -- degrades to plain score.
+    """
+    if not profile:
+        return 0, []
+    bonus = 0
+    reasons = []
+
+    # 1. Industry preference -- fuzzy match. Frontend stores board_name-derived
+    #    short names ("白酒") or long industry names ("制造业-酒、饮料和精制茶制造业");
+    #    candidates carry short STATIC_PEERS categories ("白酒"). Match on:
+    #       a) exact key hit
+    #       b) substring containment either direction
+    #       c) 2-char core-keyword co-occurrence (e.g. "家电" <-> "家用电器制造业")
+    #       d) 1-char overlap for 2-4 char category names (e.g. "白酒" <-> "...酒、饮料...")
+    iw = profile.get('industry_weights') or {}
+    if iw:
+        ind = cand.get('industry', '') or ''
+        w = iw.get(ind, 0)
+        if not w and ind and len(ind) >= 2:
+            ind_chars = set(ind)          # single chars
+            ind_core2 = {ind[i:i+2] for i in range(len(ind)-1)}
+            for k, v in iw.items():
+                if len(k) < 2:
+                    continue
+                if k in ind or ind in k:
+                    w = v
+                    break
+                if ind_core2 & {k[i:i+2] for i in range(len(k)-1)}:
+                    w = v
+                    break
+                if ind_chars & set(k):
+                    w = v
+                    break
+        if w:
+            b = min(int(w), 4) * 3
+            bonus += b
+            reasons.append("常看「" + (ind or "该行业") + "」")
+
+    # 2. Market cap bias
+    mcap_bias = profile.get('mcap_bias', '')
+    if mcap_bias:
+        mcap_yi = (cand.get('market_cap') or 0) / 1e8
+        if mcap_bias == 'large' and mcap_yi >= 1000:
+            bonus += 4; reasons.append("偏好大盘蓝筹")
+        elif mcap_bias == 'mid' and 200 <= mcap_yi < 1000:
+            bonus += 4; reasons.append("偏好中盘")
+        elif mcap_bias == 'small' and 0 < mcap_yi < 200:
+            bonus += 4; reasons.append("偏好中小盘")
+
+    # 3. PE tolerance
+    pe_tol = profile.get('pe_tolerance') or 0
+    pe = cand.get('pe') or 0
+    if pe_tol > 0 and 0 < pe <= pe_tol:
+        bonus += 3; reasons.append("PE≤" + str(int(pe_tol)) + " 估值可接受")
+
+    # 4. Style bias (approximated from existing fields only)
+    style = profile.get('style_bias', '')
+    if style:
+        mcap_yi = (cand.get('market_cap') or 0) / 1e8
+        if style == 'value' and 0 < pe <= 20:
+            bonus += 3; reasons.append("低估值价值型")
+        elif style == 'growth' and pe > 30:
+            bonus += 3; reasons.append("高成长型")
+        elif style == 'stable' and mcap_yi >= 1000:
+            bonus += 3; reasons.append("大盘稳健型")
+
+    return bonus, reasons
+
+
+def find_recommended(code, profile=None):
+    """
+    Find personalized comprehensive recommended stocks across all industries.
+    Uses static stock pool + batch quotes + lightweight scoring,
+    then applies user-profile personalization bonus (industry/mcap/PE/style).
     Excludes stocks from the same industry to avoid overlap with industry tab.
+
+    Returns top 12 candidates (paginated as 4/page client-side).
+    Zero profile degrades gracefully to plain objective scoring.
     """
-    cache_key = f"rc_{code}"
+    profile = profile or {}
+    # Profile-aware cache key (hash compactly)
+    try:
+        import hashlib
+        _ph = hashlib.md5(str(sorted(profile.items())).encode('utf-8')).hexdigest()[:8]
+    except Exception:
+        _ph = 'default'
+    cache_key = f"rc_{code}_{_ph}"
     cached_val = cached(cache_key, ttl=600)
     if cached_val:
         return cached_val
 
     market, symbol = detect_market(code)
     if market in ("HK", "US"):
-        res = _hk_us_recommended(code, market, symbol)
+        res = _hk_us_recommended(code, market, symbol, profile)
         cache_set(cache_key, res)
         return res
 
@@ -3468,19 +3573,28 @@ def find_recommended(code):
                 'pb': q.get('pb', 0) or 0,
                 'change': q.get('change_pct', 0) or 0,
                 'market_cap': q.get('mcap', 0) or 0,
+                'industry': api_fallback.static_get_industry_for_code(c) or '',
             }
             score_result = _lightweight_score(cand)
             cand['total_score'] = score_result['total_score']
             cand['recommendation'] = score_result['recommendation']
             cand['scores_breakdown'] = score_result['breakdown']
             cand['code_full'] = c + ('.SH' if wc.startswith('sh') else '.SZ')
+            # Personalization bonus
+            cand['profile_bonus'] = 0
+            cand['profile_reasons'] = []
+            if profile:
+                bonus, reasons = _apply_profile_bonus(cand, profile)
+                cand['profile_bonus'] = bonus
+                cand['profile_reasons'] = reasons
+                cand['total_score'] = cand['total_score'] + bonus
             candidates.append(cand)
         
-        # Sort by score, take top 4
+        # Sort by (personalized) score, take top 12
         candidates.sort(key=lambda x: x['total_score'], reverse=True)
-        result = candidates[:4]
+        result = candidates[:12]
         
-        print(f"[find_recommended] Scored {len(candidates)} candidates, returning {len(result)}")
+        print(f"[find_recommended] Scored {len(candidates)} candidates, returning {len(result)} (profile={'yes' if profile else 'no'})")
         cache_set(cache_key, result)
         return result
         
@@ -3558,7 +3672,17 @@ def alternatives_base():
     if not code:
         return jsonify({"error": "请输入股票代码"}), 400
 
-    cache_key = f"altbase_{code}"
+    price_range = float(data.get("price_range") or 0.15)
+    price_range = max(0.05, min(0.50, price_range))
+    profile = data.get("profile") or {}
+
+    cache_key = f"altbase_{code}_{int(price_range * 100)}"
+    if profile:
+        try:
+            import hashlib
+            cache_key += "_" + hashlib.md5(str(sorted(profile.items())).encode('utf-8')).hexdigest()[:8]
+        except Exception:
+            cache_key += "_prof"
     cached_val = cached(cache_key, ttl=600)
     if cached_val:
         t = cached_val.pop("_cache_time", "")
@@ -3576,13 +3700,13 @@ def alternatives_base():
         result["industry"] = []
 
     try:
-        result["price_similar"] = find_price_similar(code)
+        result["price_similar"] = find_price_similar(code, price_range=price_range)
     except Exception as e:
         print(f"[alt_base] price_sim error: {e}")
         result["price_similar"] = []
 
     try:
-        result["recommended"] = find_recommended(code)
+        result["recommended"] = find_recommended(code, profile=profile)
     except Exception as e:
         print(f"[alt_base] recommended error: {e}")
         result["recommended"] = []
@@ -3591,9 +3715,10 @@ def alternatives_base():
     result["_cache_time"] = cache_time
     result["_cache_meta"] = {"time": cache_time, "from_cache": False, "ttl": 600}
     result["_meta"] = {"fb": api_fallback.get_fallback_log()[-15:]}
+    result["_params"] = {"price_range": price_range, "profile": bool(profile)}
 
     _elapsed = _base_time.time() - _t0
-    print(f"[alt_base] Completed in {_elapsed:.2f}s for {code}")
+    print(f"[alt_base] Completed in {_elapsed:.2f}s for {code} (range={price_range}, profile={'yes' if profile else 'no'})")
 
     cache_set(cache_key, result)
     return jsonify(result)
@@ -3684,9 +3809,15 @@ def alternatives_cache_clear():
     cleared = []
 
     if code and code != "*":
-        targets = [f"altbase_{code}", f"ps_{code}", f"rc_{code}", f"alt_{code}"]
+        symbol = code.replace(".SH", "").replace(".SZ", "").replace(".BJ", "")
         for k in list(CACHE.keys()):
-            if k in targets or (k.startswith("altscore_") and code.replace(".SH", "").replace(".SZ", "") in k):
+            if k.startswith(f"altbase_{symbol}") or k.startswith(f"altbase_{code}"):
+                cleared.append(k)
+            elif k.startswith(f"ps_{symbol}_") or k.startswith(f"ps_{code}_"):
+                cleared.append(k)
+            elif k.startswith(f"rc_{symbol}_") or k.startswith(f"rc_{code}_"):
+                cleared.append(k)
+            elif k == f"alt_{code}" or k.startswith(f"altscore_{symbol}") or k.startswith(f"altscore_{code}"):
                 cleared.append(k)
     else:
         for k in list(CACHE.keys()):
@@ -3711,6 +3842,10 @@ def alternatives_all():
     if not code:
         return jsonify({"error": "请输入股票代码"}), 400
 
+    price_range = float(data.get("price_range") or 0.15)
+    price_range = max(0.05, min(0.50, price_range))
+    profile = data.get("profile") or {}
+
     try:
         industry = find_alternatives(code)
     except Exception as e:
@@ -3718,13 +3853,13 @@ def alternatives_all():
         industry = []
 
     try:
-        price_similar = find_price_similar(code)
+        price_similar = find_price_similar(code, price_range=price_range)
     except Exception as e:
         print(f"[alternatives_all] price_similar error: {e}")
         price_similar = []
 
     try:
-        recommended = find_recommended(code)
+        recommended = find_recommended(code, profile=profile)
     except Exception as e:
         print(f"[alternatives_all] recommended error: {e}")
         recommended = []

@@ -1146,3 +1146,7 @@ body {
   line-height: 1.5;
   margin: 0;
 }
+
+/* Model fetch status (settings) */
+.model-status-ok { color: #22c55e; }
+.model-status-fail { color: #e74c3c; }

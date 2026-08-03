@@ -1573,12 +1573,6 @@
     if (e.key === 'Enter') sendChatMessage();
   });
 
-  // ========== Settings Modal ==========
-  settingsBtn.addEventListener('click', () => openSettings());
-  settingsOverlay.addEventListener('click', (e) => {
-    if (e.target === settingsOverlay) closeSettings();
-  });
-
   // ========== AI Provider Presets ==========
   const PROVIDER_PRESETS = {
     openai:      { base: 'https://api.openai.com/v1',                       model: 'gpt-4o-mini',             name: 'OpenAI' },
@@ -1600,38 +1594,51 @@
     plain: '你是一位能把复杂股市知识讲得通俗易懂的理财顾问。用生活化的比喻解释专业术语，避免堆砌数据。回答简短直接，先说结论再解释，适合投资新手理解。',
   };
 
+  function resetModelInput() {
+    const input = $('#apiModel');
+    const select = $('#modelList');
+    const status = $('#fetchModelsStatus');
+    if (input) input.style.display = 'block';
+    if (select) select.style.display = 'none';
+    if (status) {
+      status.style.display = 'none';
+      status.textContent = '';
+      status.className = '';
+    }
+  }
+
+  function showModelStatus(text, ok) {
+    const status = $('#fetchModelsStatus');
+    if (!status) return;
+    status.style.display = 'inline-block';
+    status.textContent = text;
+    status.className = ok ? 'model-status-ok' : 'model-status-fail';
+  }
+
   function applyProviderPreset() {
     const provider = $('#apiProvider').value;
     const preset = PROVIDER_PRESETS[provider] || PROVIDER_PRESETS.custom;
     if (preset.base) $('#apiBase').value = preset.base;
     if (preset.model) $('#apiModel').value = preset.model;
-    // Hide model list when provider changes
-    const wrap = $('#modelListWrap');
-    if (wrap) wrap.style.display = 'none';
+    // Reset to manual input when provider changes (hide dropdown overlay)
+    resetModelInput();
   }
 
   async function fetchModels() {
     const apiKey = $('#apiKey').value.trim();
     const apiBase = $('#apiBase').value.trim();
-    const resultDiv = $('#testResult');
-    const wrap = $('#modelListWrap');
+    const input = $('#apiModel');
     const select = $('#modelList');
 
+    // Always start from manual-input state
+    resetModelInput();
+
     if (!apiKey || apiKey.includes('****')) {
-      if (resultDiv) {
-        resultDiv.style.display = 'block';
-        resultDiv.className = 'test-result fail';
-        resultDiv.textContent = '❌ 请先输入完整的 API Key 再获取模型列表';
-      }
+      showModelStatus('❌ 请先输入完整 API Key', false);
       return;
     }
 
-    if (wrap) wrap.style.display = 'none';
-    if (resultDiv) {
-      resultDiv.style.display = 'block';
-      resultDiv.className = 'test-result';
-      resultDiv.textContent = '⏳ 正在拉取模型列表...';
-    }
+    showModelStatus('⏳ 拉取中...', true);
 
     try {
       const resp = await fetch('/api/models', {
@@ -1641,9 +1648,8 @@
       });
       const data = await resp.json();
       if (data.models && data.models.length > 0) {
-        // Prefer chat-capable / text models
-        let models = data.models;
         // Sort: recommended (contains common chat keywords) first, then alphabetical
+        let models = data.models;
         const prio = (m) => {
           const s = m.toLowerCase();
           if (/gpt-4|deepseek|qwen|glm|moonshot|llama|claude/.test(s)) return 0;
@@ -1652,25 +1658,19 @@
         };
         models.sort((a, b) => prio(a) - prio(b) || a.localeCompare(b));
         select.innerHTML = models.map(m => `<option value="${m}">${m}</option>`).join('');
-        wrap.style.display = 'block';
         // Auto-select current model if present
-        const cur = $('#apiModel').value.trim();
+        const cur = input.value.trim();
         if (cur && models.includes(cur)) select.value = cur;
-        if (resultDiv) {
-          resultDiv.className = 'test-result success';
-          resultDiv.textContent = '✅ 找到 ' + models.length + ' 个可用模型，请从下拉选择';
-        }
+        // Overlay: hide manual input, show dropdown in its place
+        input.style.display = 'none';
+        select.style.display = 'block';
+        showModelStatus('✅ 找到 ' + models.length + ' 个，请选择', true);
       } else {
-        if (resultDiv) {
-          resultDiv.className = 'test-result fail';
-          resultDiv.textContent = '❌ ' + (data.error || '该提供商不支持模型列表接口（可手动输入模型名）');
-        }
+        // Failure: keep manual input, do NOT overlay — just show error next to button
+        showModelStatus('❌ ' + (data.error || '该提供商不支持模型列表接口（可手动输入）'), false);
       }
     } catch (err) {
-      if (resultDiv) {
-        resultDiv.className = 'test-result fail';
-        resultDiv.textContent = '❌ 拉取失败: ' + err.message;
-      }
+      showModelStatus('❌ 获取失败: ' + err.message, false);
     }
   }
 

@@ -201,10 +201,10 @@
         <label>模型名称</label>
         <div style="display:flex;gap:6px;align-items:center">
           <input type="text" id="apiModel" placeholder="gpt-4o-mini" style="flex:1">
+          <!-- dropdown overlays the input position once models are fetched -->
+          <select id="modelList" style="display:none;flex:1;padding:8px;border:1px solid var(--border);border-radius:var(--radius);font-size:0.85rem"></select>
           <button class="btn btn-outline btn-sm" id="fetchModelsBtn" title="用当前 API Key 拉取可用模型列表">📋 获取模型列表</button>
-        </div>
-        <div id="modelListWrap" style="display:none;margin-top:6px">
-          <select id="modelList" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:var(--radius);font-size:0.85rem"></select>
+          <span id="fetchModelsStatus" style="font-size:0.75rem;display:none;white-space:nowrap"></span>
         </div>
         <div style="font-size:0.75rem;color:var(--text-secondary);margin-top:2px" id="modelHint">
           点「获取模型列表」拉取该提供商全部可用模型，选中后自动填入

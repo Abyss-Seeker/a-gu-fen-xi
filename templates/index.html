@@ -8,7 +8,7 @@
   <!-- ECharts for K-line chart -->
   <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
   <style>
-    /* Quick-start examples */
+    /* Quick-start examples → Watchlist */
     .quick-examples { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
     .quick-example {
       padding: 4px 12px; background: #f1f2f6; border-radius: 16px;
@@ -16,6 +16,39 @@
       transition: all 0.2s;
     }
     .quick-example:hover { background: var(--primary-light); color: #fff; border-color: var(--primary); }
+    .watchlist-bar {
+      display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px;
+      padding: 8px 10px; background: #f8f9fa; border: 1px dashed var(--border);
+      border-radius: 10px; min-height: 38px;
+    }
+    .watchlist-label { font-size: 0.75rem; color: var(--text-secondary); font-weight: 600; white-space: nowrap; }
+    .watch-item {
+      display: inline-flex; align-items: center; gap: 4px;
+      padding: 3px 10px; background: #fff; border: 1px solid var(--border);
+      border-radius: 14px; font-size: 0.78rem; cursor: pointer;
+      transition: all 0.15s; user-select: none;
+    }
+    .watch-item:hover { border-color: var(--primary); background: var(--primary-light); color: #fff; }
+    .watch-item .watch-name { font-weight: 600; }
+    .watch-item .watch-code { color: #94a3b8; font-family: monospace; font-size: 0.7rem; }
+    .watch-item .watch-del {
+      margin-left: 2px; color: #c0c8d0; font-size: 0.85rem; line-height: 1;
+      border: none; background: none; cursor: pointer; padding: 0 1px;
+    }
+    .watch-item .watch-del:hover { color: #e74c3c; }
+    .watch-add {
+      display: inline-flex; align-items: center; gap: 3px;
+      padding: 3px 10px; border: 1px dashed var(--primary); color: var(--primary);
+      background: #fff; border-radius: 14px; font-size: 0.75rem; cursor: pointer;
+      transition: all 0.15s;
+    }
+    .watch-add:hover { background: var(--primary); color: #fff; }
+    .watch-empty { font-size: 0.75rem; color: #b0b8c0; }
+    .watch-move {
+      border: none; background: none; cursor: pointer; color: #94a3b8;
+      font-size: 0.7rem; padding: 0 2px; line-height: 1;
+    }
+    .watch-move:hover { color: var(--primary); }
     .search-hint { font-size: 0.75rem; color: var(--text-secondary); margin-top: 4px; }
     .tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 600; margin-right: 4px; }
     .tag-sh { background: #e17055; color: #fff; }
@@ -64,13 +97,9 @@
       <button class="btn btn-primary" id="searchBtn">🔍 开始分析</button>
       <div style="width:100%;margin-top:-4px">
         <div class="search-hint">支持格式：000607.SZ / 600968.SH / 纯数字代码</div>
-        <div class="quick-examples">
-          <span class="quick-example" onclick="quickSearch('000607.SZ')"><span class="tag tag-sz">SZ</span>华媒控股</span>
-          <span class="quick-example" onclick="quickSearch('600968.SH')"><span class="tag tag-sh">SH</span>海油发展</span>
-          <span class="quick-example" onclick="quickSearch('000001.SZ')"><span class="tag tag-sz">SZ</span>平安银行</span>
-          <span class="quick-example" onclick="quickSearch('600519.SH')"><span class="tag tag-sh">SH</span>贵州茅台</span>
-          <span class="quick-example" onclick="quickSearch('300750.SZ')"><span class="tag tag-sz">SZ</span>宁德时代</span>
-          <span class="quick-example" onclick="quickSearch('601975.SH')"><span class="tag tag-sh">SH</span>招商南油</span>
+        <div class="watchlist-bar" id="watchlistBar">
+          <span class="watchlist-label">📌 自选股</span>
+          <button class="watch-add" id="watchAddBtn" title="将当前搜索的股票加入自选股">＋ 添加</button>
         </div>
       </div>
     </div>
@@ -81,7 +110,7 @@
       <h3>输入股票代码开始分析</h3>
       <p>系统将自动获取基本面、技术面、资金面、事件催化、同业对标、投资性价比六大维度数据，生成深度诊断报告。</p>
       <p style="margin-top:12px;font-size:0.85rem">
-        点击上方快速示例股票试试，或直接输入你关注的股票代码
+        输入股票代码开始分析，或点击上方「＋ 添加」把关注的股票加入自选股
       </p>
     </div>
 

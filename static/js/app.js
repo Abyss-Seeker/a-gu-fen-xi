@@ -26,6 +26,21 @@
     localStorage.setItem(HISTORY_KEY, JSON.stringify(h));
     renderHistoryBar();
   }
+  // Attach features (industry/mcap/pe) to history items for profile building
+  function enrichHistory(code, name, industry, mcap_yi, pe) {
+    let h = getHistory();
+    let changed = false;
+    h.forEach(item => {
+      if (item.code === code) {
+        if (name) item.name = name;
+        if (industry) item.industry = industry;
+        if (mcap_yi) item.mcap_yi = mcap_yi;
+        if (pe) item.pe = pe;
+        changed = true;
+      }
+    });
+    if (changed) localStorage.setItem(HISTORY_KEY, JSON.stringify(h));
+  }
 
   function renderHistoryBar() {
     const h = getHistory();
@@ -40,6 +55,244 @@
       h.slice(0, 7).map(item =>
         `<span class="history-chip" onclick="document.getElementById('searchCode').value='${item.code}';document.getElementById('searchBtn').click()" title="${item.time}">${item.name}</span>`
       ).join('');
+  }
+
+  // ========== Watchlist (自选股) ==========
+  const WATCHLIST_KEY = 'stock_analyzer_watchlist';
+  // item: { code, name, industry, mcap_yi, pe, ts }
+
+  function getWatchlist() {
+    try { return JSON.parse(localStorage.getItem(WATCHLIST_KEY) || '[]'); }
+    catch (e) { return []; }
+  }
+
+  function saveWatchlist(list) {
+    localStorage.setItem(WATCHLIST_KEY, JSON.stringify(list));
+    renderWatchlistBar();
+  }
+
+  function normalizeCode(input) {
+    let c = (input || '').trim().toUpperCase();
+    if (!c) return '';
+    if (/^\d{6}$/.test(c)) {
+      // Pure 6-digit code → guess exchange
+      if (c.startsWith('6') || c.startsWith('9')) return c + '.SH';
+      if (c.startsWith('4') || c.startsWith('8')) return c + '.BJ';
+      return c + '.SZ';
+    }
+    if (/^\d{6}\.(SH|SZ|BJ)$/.test(c)) return c;
+    return '';
+  }
+
+  function addToWatchlist(code, name) {
+    const fc = normalizeCode(code);
+    if (!fc) { alert('无法识别的股票代码: ' + code); return; }
+    const list = getWatchlist();
+    if (list.some(item => item.code === fc)) {
+      alert('「' + (name || fc) + '」已在自选股中');
+      return;
+    }
+    list.push({ code: fc, name: name || fc, industry: '', mcap_yi: 0, pe: 0, ts: Date.now() });
+    saveWatchlist(list);
+  }
+
+  function removeFromWatchlist(code) {
+    saveWatchlist(getWatchlist().filter(item => item.code !== code));
+  }
+
+  function moveWatchlistItem(code, dir) {
+    const list = getWatchlist();
+    const idx = list.findIndex(item => item.code === code);
+    const target = idx + dir;
+    if (idx < 0 || target < 0 || target >= list.length) return;
+    const tmp = list[idx];
+    list[idx] = list[target];
+    list[target] = tmp;
+    saveWatchlist(list);
+  }
+
+  // Update watchlist item features after analysis (used for profile building)
+  function enrichWatchlist(code, name, industry, mcap_yi, pe) {
+    const fc = normalizeCode(code);
+    if (!fc) return;
+    const list = getWatchlist();
+    let changed = false;
+    list.forEach(item => {
+      if (item.code === fc) {
+        item.name = name || item.name;
+        if (industry) item.industry = industry;
+        if (mcap_yi) item.mcap_yi = mcap_yi;
+        if (pe) item.pe = pe;
+        item.ts = Date.now();
+        changed = true;
+      }
+    });
+    if (changed) saveWatchlist(list);
+  }
+
+  function renderWatchlistBar() {
+    const bar = $('#watchlistBar');
+    if (!bar) return;
+    const list = getWatchlist();
+    const addBtn = '<button class="watch-add" id="watchAddBtn" title="将当前搜索的股票加入自选股">＋ 添加</button>';
+    if (list.length === 0) {
+      bar.innerHTML = '<span class="watchlist-label">📌 自选股</span>' + addBtn +
+        '<span class="watch-empty">（空）搜索股票后点「＋ 添加」，或输入代码后点添加</span>';
+      return;
+    }
+    const chips = list.map(item => {
+      const tag = item.code.endsWith('.SH') ? 'SH' : item.code.endsWith('.BJ') ? 'BJ' : 'SZ';
+      const tagCls = item.code.endsWith('.SH') ? 'tag-sh' : item.code.endsWith('.BJ') ? 'tag-bj' : 'tag-sz';
+      return `<span class="watch-item" data-wcode="${item.code}" title="点击分析 ${item.code}">
+        <span class="tag ${tagCls}" style="font-size:0.6rem;padding:0 4px">${tag}</span>
+        <span class="watch-name">${item.name || item.code}</span>
+        <span class="watch-code">${item.code}</span>
+        <button class="watch-move" data-wmove="-1" title="左移">◀</button>
+        <button class="watch-move" data-wmove="1" title="右移">▶</button>
+        <button class="watch-del" data-wdel="${item.code}" title="删除">×</button>
+      </span>`;
+    }).join('');
+    bar.innerHTML = '<span class="watchlist-label">📌 自选股</span>' + addBtn + chips;
+  }
+
+  // Watchlist events (delegated — app.js runs in IIFE, inline onclick won't work)
+  document.addEventListener('click', function(e) {
+    const addBtn = e.target.closest('#watchAddBtn');
+    if (addBtn) {
+      const input = $('#searchCode');
+      const code = input ? input.value.trim() : '';
+      if (!code) { alert('请先在搜索框输入要添加的股票代码'); return; }
+      const sel = document.querySelector('.search-dropdown-item.active');
+      const fc = sel ? sel.getAttribute('data-code-full') : normalizeCode(code);
+      addToWatchlist(fc || code, sel ? sel.querySelector('.search-item-name').textContent : '');
+      return;
+    }
+    const delBtn = e.target.closest('.watch-del');
+    if (delBtn) {
+      removeFromWatchlist(delBtn.getAttribute('data-wdel'));
+      return;
+    }
+    const mvBtn = e.target.closest('.watch-move');
+    if (mvBtn) {
+      const item = mvBtn.closest('.watch-item');
+      if (item) moveWatchlistItem(item.getAttribute('data-wcode'), parseInt(mvBtn.getAttribute('data-wmove')));
+      return;
+    }
+    const wItem = e.target.closest('.watch-item');
+    if (wItem && !e.target.closest('.watch-del') && !e.target.closest('.watch-move')) {
+      const input = $('#searchCode');
+      if (input) input.value = wItem.getAttribute('data-wcode');
+      $('#searchBtn').click();
+    }
+  });
+
+  // ========== User Profile (画像) — built entirely client-side ==========
+  const PROFILE_KEY = 'stock_analyzer_profile';
+  const PRICE_RANGE_KEY = 'stock_analyzer_price_range';
+  const DEFAULT_PRICE_RANGE = 0.15;
+
+  function getPriceRangeSetting() {
+    try {
+      const v = parseFloat(localStorage.getItem(PRICE_RANGE_KEY));
+      if (v >= 0.05 && v <= 0.5) return v;
+    } catch (e) { /* ignore */ }
+    return DEFAULT_PRICE_RANGE;
+  }
+  function setPriceRangeSetting(v) {
+    const val = Math.max(0.05, Math.min(0.5, parseFloat(v) || DEFAULT_PRICE_RANGE));
+    localStorage.setItem(PRICE_RANGE_KEY, String(val));
+  }
+
+  /**
+   * Build user profile from watchlist + search history.
+   * Industry names are matched by keyword against STATIC_PEERS categories
+   * (the frontend learns them from analysis reports; fallback: keyword guess).
+   */
+  function buildUserProfile() {
+    const profile = { industry_weights: {}, mcap_bias: '', pe_tolerance: 0, style_bias: '' };
+
+    // Collect features from watchlist + history
+    const stocks = [];
+    getWatchlist().forEach(w => {
+      if (w.code) stocks.push({ code: w.code, name: w.name, industry: w.industry || '', mcap_yi: w.mcap_yi || 0, pe: w.pe || 0 });
+    });
+    getHistory().slice(0, 10).forEach(h => {
+      if (h.code) stocks.push({ code: h.code, name: h.name, industry: h.industry || '', mcap_yi: h.mcap_yi || 0, pe: h.pe || 0 });
+    });
+    if (stocks.length === 0) return profile;
+
+    // 1. Industry weights (count frequency, keyword-match to known categories)
+    const CATS = ['白酒','家电','银行','证券','保险','医药','电子','半导体','汽车','新能源','电力','食品','房地产','钢铁','煤炭','石油','化工','机械','纺织','通信','计算机','传媒','军工','环保','公用事业','交通运输','零售','旅游','农林','有色','建材','建筑'];
+    // Map long industry names to short categories (e.g. "制造业-酒、饮料和精制茶制造业" → "白酒")
+    function shortCategory(name) {
+      if (!name) return '';
+      for (const cat of CATS) {
+        if (name.includes(cat)) return cat;
+      }
+      return name; // keep as-is if unknown
+    }
+    const indCount = {};
+    stocks.forEach(s => {
+      const ind = s.industry ? shortCategory(s.industry) : '';
+      if (ind) {
+        indCount[ind] = (indCount[ind] || 0) + 1;
+      } else {
+        // keyword guess from name (coarse)
+        for (const cat of CATS) {
+          if (s.name && s.name.includes(cat.slice(0, 2))) {
+            indCount[cat] = (indCount[cat] || 0) + 1;
+            break;
+          }
+        }
+      }
+    });
+    const total = stocks.length || 1;
+    Object.entries(indCount).forEach(([k, v]) => {
+      if (v >= 1) profile.industry_weights[k] = Math.round((v / total) * 10); // 0-10 scale
+    });
+
+    // 2. Market cap bias (median mcap)
+    const mcaps = stocks.map(s => s.mcap_yi).filter(v => v > 0);
+    if (mcaps.length > 0) {
+      mcaps.sort((a, b) => a - b);
+      const med = mcaps[Math.floor(mcaps.length / 2)];
+      if (med >= 1000) profile.mcap_bias = 'large';
+      else if (med >= 200) profile.mcap_bias = 'mid';
+      else profile.mcap_bias = 'small';
+    }
+
+    // 3. PE tolerance (median PE * 1.3, floor 15, cap 60)
+    const pes = stocks.map(s => s.pe).filter(v => v > 0);
+    if (pes.length > 0) {
+      pes.sort((a, b) => a - b);
+      const medPe = pes[Math.floor(pes.length / 2)];
+      profile.pe_tolerance = Math.max(15, Math.min(60, Math.round(medPe * 1.3)));
+    }
+
+    // 4. Style bias from median PE / mcap
+    const medPe = pes.length ? pes[Math.floor(pes.length / 2)] : 0;
+    const medMcap = mcaps.length ? mcaps[Math.floor(mcaps.length / 2)] : 0;
+    if (medPe > 0 && medPe <= 20) profile.style_bias = 'value';
+    else if (medPe > 30) profile.style_bias = 'growth';
+    else if (medMcap >= 1000) profile.style_bias = 'stable';
+
+    return profile;
+  }
+
+  // Generate human-readable "why recommended for you" lines from profile
+  function profileReasonLines(profile) {
+    const lines = [];
+    const iw = profile.industry_weights || {};
+    const topInds = Object.entries(iw).sort((a, b) => b[1] - a[1]).slice(0, 2).map(x => x[0]);
+    if (topInds.length) lines.push('你常看「' + topInds.join('」「') + '」');
+    if (profile.mcap_bias === 'large') lines.push('偏好大盘蓝筹');
+    if (profile.mcap_bias === 'mid') lines.push('偏好中盘');
+    if (profile.mcap_bias === 'small') lines.push('偏好中小盘');
+    if (profile.pe_tolerance) lines.push('PE≤' + profile.pe_tolerance + ' 可接受');
+    if (profile.style_bias === 'value') lines.push('倾向低估值价值型');
+    if (profile.style_bias === 'growth') lines.push('倾向成长型');
+    if (profile.style_bias === 'stable') lines.push('倾向稳健大盘');
+    return lines;
   }
 
   // ========== DOM Refs ==========
@@ -92,6 +345,17 @@
       emptyState.classList.add('hidden');
       reportArea.classList.remove('hidden');
       addHistory(data.code, data.name);
+      // Enrich watchlist + history with features for profile building
+      // Prefer board_name (e.g. "白酒Ⅱ") over long industry_name (e.g. "制造业-酒、饮料和精制茶制造业")
+      const indDetail = (data.scores && data.scores.industry && data.scores.industry.detail) || {};
+      const boardRaw = indDetail.board_name || '';
+      const indName = boardRaw
+        ? boardRaw.replace(/[ⅠⅡⅢⅣⅤ]+/g, '').replace(/行业$/, '').trim()
+        : (indDetail.industry_name || '');
+      const mcapYi = data.total_mv ? parseFloat(data.total_mv) : 0;
+      const peV = data.pe ? parseFloat(data.pe) : 0;
+      enrichWatchlist(data.code, data.name, indName, mcapYi, peV);
+      enrichHistory(data.code, data.name, indName, mcapYi, peV);
       loadAlternatives(code);
       window.scrollTo({ top: 0, behavior: 'smooth' });
     } catch (err) {
@@ -654,7 +918,13 @@
     const turnover = td.turnover || 0;
 
     let maRows = '';
-    for (const [name, val] of Object.entries(mas)) {
+    // Sort MA keys numerically: MA5 < MA10 < MA20 < MA60 < MA120 < MA250
+    const maEntries = Object.entries(mas).sort((a, b) => {
+      const na = parseInt((a[0] || '').replace(/[^0-9]/g, ''), 10) || 0;
+      const nb = parseInt((b[0] || '').replace(/[^0-9]/g, ''), 10) || 0;
+      return na - nb;
+    });
+    for (const [name, val] of maEntries) {
       const vs = val ? (r.price - val > 0 ? '上方' : '下方') : '--';
       maRows += `<tr><td>${name}</td><td>${val ? val.toFixed(2) : '--'}</td><td>${val ? ((r.price - val) / val * 100).toFixed(1) + '%' : '--'}</td><td class="${r.price > val ? 'trend-up' : 'trend-down'}">${val ? vs : '--'}</td></tr>`;
     }
@@ -742,8 +1012,9 @@
       eventItems = events.map(e => {
         const sScore = e.sentiment_score || 0;
         let icon = '⚪';
-        if (e.sentiment === 'positive') icon = sScore >= 4 ? '🟢🟢' : '🟢';
-        else if (e.sentiment === 'negative') icon = sScore >= 4 ? '🔴🔴' : '🔴';
+        // A-share convention: bullish=red, bearish=green
+        if (e.sentiment === 'positive') icon = sScore >= 4 ? '🔴🔴' : '🔴';
+        else if (e.sentiment === 'negative') icon = sScore >= 4 ? '🟢🟢' : '🟢';
         const evtUrl = e.url || '';
         const titleHtml = evtUrl
           ? `<a href="${evtUrl}" target="_blank" rel="noopener" class="event-title-link" title="点击查看公告原文">${e.title || ''}</a>`
@@ -776,7 +1047,7 @@
               ? `<a href="${keUrl}" target="_blank" rel="noopener" class="event-title-link" title="点击查看公告原文"><b>${e.title || ''}</b></a>`
               : `<span class="event-title"><b>${e.title || ''}</b></span>`;
             return `<div class="event-item ${e.sentiment}" style="background:#f8f9fa;border-radius:6px;padding:6px 10px;margin:4px 0">
-            <span class="event-icon">${e.sentiment === 'positive' ? '🟢' : '🔴'}</span>
+            <span class="event-icon">${e.sentiment === 'positive' ? '🔴' : '🟢'}</span>
             <span class="event-date">${e.date || ''}</span>
             ${keTitleHtml}
             ${keUrl ? `<a href="${keUrl}" target="_blank" rel="noopener" class="event-ext-link" title="查看原文">🔗</a>` : ''}
@@ -1238,6 +1509,7 @@
 
     // Reset
     _altActiveMode = 'industry';
+    _altPage = 0;
     _altFullScores = {};
     _altScoreLoadState = 'idle';
     _altDeepCache = {};  // reset deep comparison cache for new stock
@@ -1252,10 +1524,13 @@
 
     try {
       // Step 1: Get base preview (fast, < 3s)
+      // Personalization: pass client-side profile + user price-range setting
+      var profile = buildUserProfile();
+      var priceRange = getPriceRangeSetting();
       var baseResp = await fetch('/api/alternatives/base', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code }),
+        body: JSON.stringify({ code: code, profile: profile, price_range: priceRange }),
       });
       var baseData = await baseResp.json();
 
@@ -1288,7 +1563,7 @@
             var fbResp = await fetch('/api/alternatives/all', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ code: code }),
+              body: JSON.stringify({ code: code, profile: buildUserProfile(), price_range: getPriceRangeSetting() }),
             });
             var fbData = await fbResp.json();
             emptyModes.forEach(function(m) {
@@ -1314,7 +1589,9 @@
       var allCodes = [];
       var seen = {};
       ALL_MODES.forEach(function(mode) {
-        (_altCache[mode] || []).forEach(function(a) {
+        // Limit to first 6 per mode for deep scoring — 3 modes × 6 = 18 candidates max,
+        // keeps Vercel batch scoring responsive while still covering page 2 of "换一批".
+        (_altCache[mode] || []).slice(0, 6).forEach(function(a) {
           var fc = a.code_full || (a.code && a.code.startsWith('6') ? a.code + '.SH' : a.code + '.SZ');
           if (fc && !seen[fc]) {
             seen[fc] = true;
@@ -1446,6 +1723,7 @@
   function switchAltTab(mode) {
     if (!_altCache._loaded) return;
     _altActiveMode = mode;
+    _altPage = 0;  // reset pagination per tab
     updateAltTabUI();
     renderAltContent();
   }
@@ -1530,15 +1808,20 @@
     loadAllAlternatives(code);
   }
 
+  // Pagination state for "换一批" (per active mode, 4 per page)
+  var _altPage = 0;
+  var ALT_PAGE_SIZE = 4;
+
   function renderAltContent() {
     var container = $('#altContent');
     if (!container) return;
 
     var alts = _altCache[_altActiveMode] || [];
+    var priceRange = getPriceRangeSetting();
     var modeLabels = {
       industry: '🏭 同板块低PE标的（来自申万行业分类）',
-      price_similar: '💰 相似价格区间标的（±30%）',
-      recommended: '⭐ 综合推荐标的（跨行业优质筛选）',
+      price_similar: '💰 相似价格区间标的（±' + Math.round(priceRange * 100) + '%）',
+      recommended: '⭐ 个性化综合推荐（基于你的自选/搜索画像）',
     };
     var emptyLabels = {
       industry: '未找到同行业替代标的',
@@ -1546,10 +1829,19 @@
       recommended: '暂无综合推荐标的',
     };
 
+    // Clamp page
+    var totalPages = Math.max(1, Math.ceil(alts.length / ALT_PAGE_SIZE));
+    if (_altPage >= totalPages) _altPage = 0;
+    if (_altPage < 0) _altPage = 0;
+
     if (alts.length === 0) {
       container.innerHTML = '<p style="color:var(--text-secondary)">' + (emptyLabels[_altActiveMode] || '暂无数据') + '</p>';
       return;
     }
+
+    // Slice current page (paginated 4 per page)
+    var pageAlts = alts.slice(_altPage * ALT_PAGE_SIZE, (_altPage + 1) * ALT_PAGE_SIZE);
+    var pageStartIdx = _altPage * ALT_PAGE_SIZE;
 
     // Build cards with deep analysis button state
     // Button is disabled until all scoring is done (or errored)
@@ -1560,8 +1852,9 @@
     var btnAttr = deepBtnEnabled ? ' data-alt-deep="' : '';
 
     var cardsHtml = '';
-    for (var i = 0; i < alts.length; i++) {
-      var a = alts[i];
+    for (var i = 0; i < pageAlts.length; i++) {
+      var a = pageAlts[i];
+      var globalIdx = pageStartIdx + i;
       var fullCode = a.code_full || (a.code && a.code.startsWith('6') ? a.code + '.SH' : a.code + '.SZ');
 
       // Check for full score
@@ -1595,9 +1888,24 @@
         mcapDisplay = '<div class="alt-mcap">市值 ' + (a.market_cap / 1e8).toFixed(0) + '亿</div>';
       }
 
+      // Personalization reasons (recommended mode): backend profile_reasons, or client-side lines
+      var reasonHtml = '';
+      if (_altActiveMode === 'recommended') {
+        if (a.profile_reasons && a.profile_reasons.length > 0) {
+          reasonHtml = '<div class="alt-reason">✓ ' + a.profile_reasons.join(' · ') + '</div>';
+        } else {
+          var profile = buildUserProfile();
+          var lines = profileReasonLines(profile);
+          if (lines.length > 0) {
+            // Match industry if candidate has one
+            reasonHtml = '<div class="alt-reason">✓ ' + lines.slice(0, 2).join(' · ') + '</div>';
+          }
+        }
+      }
+
       cardsHtml += '<div class="alt-card-wrap">' +
         '<div class="alt-card" data-alt-fullcode="' + fullCode + '" style="cursor:pointer">' +
-          '<div class="alt-name"><span class="alt-rank">#' + (i+1) + '</span> ' + (a.name || '') + '</div>' +
+          '<div class="alt-name"><span class="alt-rank">#' + (globalIdx + 1) + '</span> ' + (a.name || '') + '</div>' +
           '<div class="alt-code">' + fullCode + '</div>' +
           '<div class="alt-stats">' +
             '<div class="alt-stat"><div class="alt-stat-label">价格</div><span>¥' + ((a.price||0)).toFixed(2) + '</span></div>' +
@@ -1606,19 +1914,44 @@
             '<div class="alt-stat"><div class="alt-stat-label">涨跌</div><span class="' + ((a.change||0) >= 0 ? 'trend-up' : 'trend-down') + '">' + ((a.change||0) > 0 ? '+' : '') + (a.change||0).toFixed(2) + '%</span></div>' +
           '</div>' +
           mcapDisplay +
+          reasonHtml +
           (realScore > 0
             ? '<div class="alt-score-bar"><div class="alt-score-label">综合评分 ' + scoreBadge + (recd ? ' · ' + recd : '') + '</div><div class="alt-score-value ' + scoreCls + '">' + realScore + '分</div></div>'
             : '<div class="alt-score-bar"><div class="alt-score-label" style="color:#999">评分计算中...</div></div>') +
         '</div>' +
-        '<button class="' + btnCls + '"' + btnAttr + i + '" title="' + deepBtnTitle + '">' +
+        '<button class="' + btnCls + '"' + btnAttr + globalIdx + '" title="' + deepBtnTitle + '">' +
           '📊 深度对比' +
-          '<span class="alt-deep-arrow" id="altDeepArrow' + i + '">▾</span>' +
+          '<span class="alt-deep-arrow" id="altDeepArrow' + globalIdx + '">▾</span>' +
         '</button>' +
-        '<div class="alt-deep-panel" id="altDeepPanel' + i + '" style="display:none"></div>' +
+        '<div class="alt-deep-panel" id="altDeepPanel' + globalIdx + '" style="display:none"></div>' +
+        '</div>';
+    }
+
+    // "换一批" pagination controls + price-range slider (price_similar mode only)
+    var pagerHtml = '';
+    if (totalPages > 1) {
+      pagerHtml += '<div class="alt-pager">' +
+        '<span style="font-size:0.75rem;color:var(--text-secondary)">第 ' + (_altPage + 1) + '/' + totalPages + ' 页 · 共 ' + alts.length + ' 只</span> ' +
+        '<button class="btn-alt-page" data-alt-page="prev" ' + (_altPage === 0 ? 'disabled' : '') + '>← 上一批</button> ' +
+        '<button class="btn-alt-page" data-alt-page="next" ' + (_altPage >= totalPages - 1 ? 'disabled' : '') + '>换一批 →</button>' +
+        '</div>';
+    }
+
+    var rangeSliderHtml = '';
+    if (_altActiveMode === 'price_similar') {
+      var pr = Math.round(priceRange * 100);
+      rangeSliderHtml = '<div class="alt-range-slider">' +
+        '<label style="font-size:0.75rem;color:var(--text-secondary)">相似股价区间 ±</label>' +
+        '<input type="range" id="altRangeSlider" min="5" max="50" value="' + pr + '" style="width:120px;vertical-align:middle">' +
+        '<input type="number" id="altRangeInput" min="5" max="50" value="' + pr + '" style="width:52px;font-size:0.75rem;padding:2px 4px;text-align:center">' +
+        '<span style="font-size:0.75rem;color:var(--text-secondary)">%</span>' +
+        '<button class="btn-alt-page" id="altRangeApply" style="margin-left:6px">应用</button>' +
+        '<span style="font-size:0.7rem;color:#94a3b8;margin-left:6px">调整后自动刷新该标签页</span>' +
         '</div>';
     }
 
     container.innerHTML = '<div class="alt-grid">' + cardsHtml + '</div>' +
+      pagerHtml + rangeSliderHtml +
       '<p style="font-size:0.75rem;color:var(--text-secondary);margin-top:8px">' +
         (modeLabels[_altActiveMode] || '') + ' | 点击卡片可切换分析该股票' +
       '</p>';
@@ -1627,16 +1960,16 @@
 
     // Auto-expand cached deep comparisons
     if (currentReport && Object.keys(_altDeepCache).length > 0) {
-      for (var di = 0; di < alts.length; di++) {
-        var altItem = alts[di];
+      for (var di = 0; di < pageAlts.length; di++) {
+        var altItem = pageAlts[di];
         var altFc = altItem.code_full || (altItem.code && altItem.code.startsWith('6') ? altItem.code + '.SH' : altItem.code + '.SZ');
         var ck = (currentReport.code || '') + '_' + (altFc || '');
         var cached = _altDeepCache[ck];
         if (cached && cached.html) {
-          var panel = document.getElementById('altDeepPanel' + di);
-          var arrow = document.getElementById('altDeepArrow' + di);
+          var panel = document.getElementById('altDeepPanel' + (pageStartIdx + di));
+          var arrow = document.getElementById('altDeepArrow' + (pageStartIdx + di));
           if (panel) {
-            _renderDeepCacheToPanel(panel, cached, di);
+            _renderDeepCacheToPanel(panel, cached, pageStartIdx + di);
             panel.style.display = 'block';
             if (arrow) arrow.textContent = '▴';
             console.log('%c[Alt Deep] 自动展开缓存: ' + ck, 'color:#44bb44');
@@ -1652,6 +1985,35 @@
     if (tab) {
       var mode = tab.getAttribute('data-alt-mode');
       if (mode) switchAltTab(mode);
+      return;
+    }
+    // Pagination: 换一批
+    var pageBtn = e.target.closest('.btn-alt-page');
+    if (pageBtn && pageBtn.id !== 'altRangeApply') {
+      e.stopPropagation();
+      var dir = pageBtn.getAttribute('data-alt-page');
+      var totalPages = Math.max(1, Math.ceil((_altCache[_altActiveMode] || []).length / ALT_PAGE_SIZE));
+      if (dir === 'next' && _altPage < totalPages - 1) _altPage++;
+      if (dir === 'prev' && _altPage > 0) _altPage--;
+      renderAltContent();
+      return;
+    }
+    // Price-range apply button
+    var rangeApply = e.target.closest('#altRangeApply');
+    if (rangeApply) {
+      e.stopPropagation();
+      var input = document.getElementById('altRangeInput');
+      var slider = document.getElementById('altRangeSlider');
+      var val = slider ? parseInt(slider.value, 10) : 15;
+      if (input) val = parseInt(input.value, 10) || val;
+      val = Math.max(5, Math.min(50, val));
+      setPriceRangeSetting(val / 100);
+      if (slider) slider.value = val;
+      if (input) input.value = val;
+      // Reload with new range
+      var codeInput = document.getElementById('searchCode');
+      var code = codeInput ? codeInput.value : '';
+      if (code) loadAllAlternatives(code);
       return;
     }
     // Cache clear button
@@ -2657,6 +3019,21 @@
     if (e.ctrlKey && e.key === 'k') {
       e.preventDefault();
       searchInput.focus();
+    }
+  });
+
+  // ========== Watchlist init ==========
+  renderWatchlistBar();
+  renderHistoryBar();
+
+  // Price-range slider <-> input sync (delegated: both are re-created per render)
+  document.addEventListener('input', function(e) {
+    if (e.target && e.target.id === 'altRangeSlider') {
+      var input = document.getElementById('altRangeInput');
+      if (input) input.value = e.target.value;
+    } else if (e.target && e.target.id === 'altRangeInput') {
+      var slider = document.getElementById('altRangeSlider');
+      if (slider) slider.value = e.target.value;
     }
   });
 

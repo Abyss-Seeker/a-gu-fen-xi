@@ -1598,7 +1598,9 @@
       var baseData = await baseResp.json();
 
       _altCache.industry = baseData.industry || [];
-      _altCache.price_similar = baseData.price_similar || [];
+      // price_similar is now {items:[...], meta:{...}} from backend
+      _altCache.price_similar = (baseData.price_similar && baseData.price_similar.items) ? baseData.price_similar.items : (baseData.price_similar || []);
+      _altCache.price_similar_meta = (baseData.price_similar && baseData.price_similar.meta) ? baseData.price_similar.meta : null;
       _altCache.recommended = baseData.recommended || [];
       _altCache._loaded = true;
       _altCache._cache_meta = baseData._cache_meta;
@@ -1630,9 +1632,15 @@
             });
             var fbData = await fbResp.json();
             emptyModes.forEach(function(m) {
-              if (fbData[m] && fbData[m].length > 0) {
-                _altCache[m] = fbData[m];
-                console.log('%c[Alt] ✅ 回退成功加载 ' + m + ': ' + fbData[m].length + ' 只', 'color:#44bb44');
+              var val = fbData[m];
+              // price_similar may be {items:[...], meta:{...}} — unwrap
+              var items = (val && val.items) ? val.items : val;
+              if (items && items.length > 0) {
+                _altCache[m] = items;
+                if (m === 'price_similar' && val && val.meta) {
+                  _altCache.price_similar_meta = val.meta;
+                }
+                console.log('%c[Alt] ✅ 回退成功加载 ' + m + ': ' + items.length + ' 只', 'color:#44bb44');
               }
             });
           } catch (fbErr) {
@@ -1783,6 +1791,103 @@
     return loadAllAlternatives(code);
   }
 
+  /**
+   * Refresh ONLY price_similar + recommended after a price-range change.
+   * Industry tab is left untouched (its data doesn't depend on the range).
+   * Also re-runs deep scoring for the new candidate set.
+   */
+  async function refreshPriceSimilarAndRecommended(code) {
+    var container = $('#altContent');
+    if (!container) return;
+
+    _altPage = 0;
+    _altFullScores = {};
+    _altScoreLoadState = 'loading';
+
+    // If user is on industry tab, keep showing it; otherwise show loading
+    var wasIndustry = (_altActiveMode === 'industry');
+    if (!wasIndustry) {
+      container.innerHTML = '<p style="color:var(--text-secondary);padding:16px 0">⏳ 正在按新区间刷新...</p>';
+    }
+
+    try {
+      var profile = buildUserProfile();
+      var priceRange = getPriceRangeSetting();
+      var baseResp = await fetch('/api/alternatives/base', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: code, profile: profile, price_range: priceRange }),
+      });
+      var baseData = await baseResp.json();
+
+      _altCache.price_similar = (baseData.price_similar && baseData.price_similar.items) ? baseData.price_similar.items : (baseData.price_similar || []);
+      _altCache.price_similar_meta = (baseData.price_similar && baseData.price_similar.meta) ? baseData.price_similar.meta : null;
+      _altCache.recommended = baseData.recommended || [];
+      _altCache._loaded = true;
+      _altCache._cache_meta = baseData._cache_meta;
+
+      _logFallbackInfo('替代标的(区间刷新)', baseData, baseResp);
+
+      // Re-run deep scoring for new candidates (price_similar + recommended only)
+      var allCodes = [];
+      var seen = {};
+      ['price_similar', 'recommended'].forEach(function(mode) {
+        (_altCache[mode] || []).slice(0, 6).forEach(function(a) {
+          var fc = a.code_full || (a.code && a.code.startsWith('6') ? a.code + '.SH' : a.code + '.SZ');
+          if (fc && !seen[fc]) {
+            seen[fc] = true;
+            allCodes.push(fc);
+          }
+        });
+      });
+
+      if (allCodes.length > 0) {
+        var BATCH = 4;
+        for (var b = 0; b < allCodes.length; b += BATCH) {
+          var batch = allCodes.slice(b, b + BATCH);
+          try {
+            var scoreResp = await fetchWithTimeout('/api/alternatives/score', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ codes: batch }),
+            }, 12000);
+            var scoreData = await scoreResp.json();
+            (scoreData.scores || []).forEach(function(s) {
+              if (s.source === 'full' && s.total_score > 0) {
+                _altFullScores[s.code] = s;
+                ['price_similar', 'recommended'].forEach(function(mode) {
+                  (_altCache[mode] || []).forEach(function(a) {
+                    var afc = a.code_full || (a.code && a.code.startsWith('6') ? a.code + '.SH' : a.code + '.SZ');
+                    if (afc === s.code || a.code + '.SZ' === s.code || a.code + '.SH' === s.code) {
+                      a.total_score = s.total_score;
+                      a.recommendation = s.recommendation;
+                    }
+                  });
+                });
+              }
+            });
+          } catch (err) {
+            console.warn('[Alt] 区间刷新深度评分失败:', err.message);
+          }
+        }
+      }
+
+      _altScoreLoadState = 'done';
+
+      // Keep industry tab if user was there; else show refreshed content
+      if (_altActiveMode !== 'industry') {
+        renderAltContent();
+      }
+      showCacheInfo();
+    } catch (err) {
+      console.error('[Alt] 区间刷新失败:', err);
+      if (_altActiveMode !== 'industry') {
+        container.innerHTML = '<p style="color:var(--text-secondary)">刷新失败，请重试</p>';
+      }
+      _altScoreLoadState = 'idle';
+    }
+  }
+
   function switchAltTab(mode) {
     if (!_altCache._loaded) return;
     _altActiveMode = mode;
@@ -1881,9 +1986,12 @@
 
     var alts = _altCache[_altActiveMode] || [];
     var priceRange = getPriceRangeSetting();
+    // price_similar meta note (strict vs approx counts)
+    var psMeta = _altCache.price_similar_meta || null;
+    var psNote = psMeta && psMeta.note ? psMeta.note : ('±' + Math.round(priceRange * 100) + '%');
     var modeLabels = {
       industry: '🏭 同板块低PE标的（来自申万行业分类）',
-      price_similar: '💰 相似价格区间标的（±' + Math.round(priceRange * 100) + '%）',
+      price_similar: '💰 相似价格区间标的（' + psNote + '）',
       recommended: '⭐ 个性化综合推荐（基于你的自选/搜索画像）',
     };
     var emptyLabels = {
@@ -1951,6 +2059,13 @@
         mcapDisplay = '<div class="alt-mcap">市值 ' + (a.market_cap / 1e8).toFixed(0) + '亿</div>';
       }
 
+      // Approx marker for out-of-band candidates (price_similar mode)
+      var approxHtml = '';
+      if (_altActiveMode === 'price_similar' && a.approx) {
+        var devTxt = (typeof a.deviation_pct === 'number') ? '≈偏离 ' + a.deviation_pct + '%' : '（无价格数据）';
+        approxHtml = '<div class="alt-approx" title="该标的不在所选价格区间内，为最接近的近似标的">⚠️ 超区间 ' + devTxt + '</div>';
+      }
+
       // Personalization reasons (recommended mode): backend profile_reasons, or client-side lines
       var reasonHtml = '';
       if (_altActiveMode === 'recommended') {
@@ -1977,6 +2092,7 @@
             '<div class="alt-stat"><div class="alt-stat-label">涨跌</div><span class="' + ((a.change||0) >= 0 ? 'trend-up' : 'trend-down') + '">' + ((a.change||0) > 0 ? '+' : '') + (a.change||0).toFixed(2) + '%</span></div>' +
           '</div>' +
           mcapDisplay +
+          approxHtml +
           reasonHtml +
           (realScore > 0
             ? '<div class="alt-score-bar"><div class="alt-score-label">综合评分 ' + scoreBadge + (recd ? ' · ' + recd : '') + '</div><div class="alt-score-value ' + scoreCls + '">' + realScore + '分</div></div>'
@@ -2061,7 +2177,7 @@
       renderAltContent();
       return;
     }
-    // Price-range apply button
+    // Price-range apply button — refresh ONLY price_similar + recommended
     var rangeApply = e.target.closest('#altRangeApply');
     if (rangeApply) {
       e.stopPropagation();
@@ -2073,10 +2189,10 @@
       setPriceRangeSetting(val / 100);
       if (slider) slider.value = val;
       if (input) input.value = val;
-      // Reload with new range
+      // Reload ONLY price_similar + recommended (industry unaffected)
       var codeInput = document.getElementById('searchCode');
       var code = codeInput ? codeInput.value : '';
-      if (code) loadAllAlternatives(code);
+      if (code) refreshPriceSimilarAndRecommended(code);
       return;
     }
     // Cache clear button

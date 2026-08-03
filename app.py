@@ -1938,12 +1938,13 @@ def _lightweight_score(candidate, context=None):
     """
     Pure math scoring — zero API calls, always succeeds.
     
-    Dimensions:
-      PE score  (0-30): Lower PE = better value
-      PB score  (0-20): Lower PB = better value
-      MCap score(0-15): Larger market cap = more stable
-      Momentum  (0-15): Healthy range preferred
-      Quality   (0-20): ROE + stability composite
+    Dimensions (v2, rebalanced 2026-08-03 to fix "recommended is all banks"):
+      PE score  (0-20): Lower PE = better value  (was 30 — banks maxed it out)
+      PB score  (0-15): Lower PB = better value  (was 20)
+      MCap score(0-10): Larger market cap = stable (was 15)
+      Momentum  (0-20): Healthy trend preferred  (was 15 — now rewards active movers)
+      Quality   (0-25): ROE + stability + blue-chip (was 20)
+    Total max = 90 (was 100) so a bank can no longer hit 92+ automatically.
     
     context: optional dict with extra info (e.g., primary stock price for similarity)
     """
@@ -1956,85 +1957,85 @@ def _lightweight_score(candidate, context=None):
     score = 0
     breakdown = {}
     
-    # 1. PE score (0-30)
+    # 1. PE score (0-20)
     if 0 < pe <= 8:
-        pe_score = 30
+        pe_score = 18
         pe_note = "极低估值"
     elif 8 < pe <= 15:
-        pe_score = 25
+        pe_score = 15
         pe_note = "低估值"
     elif 15 < pe <= 25:
-        pe_score = 20
+        pe_score = 12
         pe_note = "合理偏低"
     elif 25 < pe <= 40:
-        pe_score = 15
+        pe_score = 9
         pe_note = "合理"
     elif 40 < pe <= 80:
-        pe_score = 8
+        pe_score = 5
         pe_note = "偏高"
     elif pe > 80:
-        pe_score = 3
+        pe_score = 2
         pe_note = "极高"
     else:
-        pe_score = 10
+        pe_score = 8
         pe_note = "PE不可用"
     score += pe_score
     breakdown['pe'] = {'score': pe_score, 'note': pe_note, 'value': pe}
     
-    # 2. PB score (0-20)
+    # 2. PB score (0-15)
     if 0 < pb <= 1:
-        pb_score = 20
+        pb_score = 13
         pb_note = "破净/极低"
     elif 1 < pb <= 2:
-        pb_score = 16
+        pb_score = 11
         pb_note = "低PB"
     elif 2 < pb <= 4:
-        pb_score = 12
+        pb_score = 8
         pb_note = "合理"
     elif 4 < pb <= 8:
-        pb_score = 7
+        pb_score = 5
         pb_note = "偏高"
     elif pb > 8:
-        pb_score = 3
+        pb_score = 2
         pb_note = "极高PB"
     else:
-        pb_score = 8
+        pb_score = 6
         pb_note = "PB不可用"
     score += pb_score
     breakdown['pb'] = {'score': pb_score, 'note': pb_note, 'value': pb}
     
-    # 3. Market cap score (0-15)
+    # 3. Market cap score (0-10)
     mcap_yi = mcap / 1e8  # convert to 亿
     if mcap_yi > 5000:
-        mcap_score = 15
+        mcap_score = 10
         mcap_note = "超大盘蓝筹"
     elif mcap_yi > 1000:
-        mcap_score = 13
+        mcap_score = 8
         mcap_note = "大盘"
     elif mcap_yi > 300:
-        mcap_score = 10
+        mcap_score = 7
         mcap_note = "中盘"
     elif mcap_yi > 100:
-        mcap_score = 7
+        mcap_score = 5
         mcap_note = "中小盘"
     elif mcap_yi > 0:
-        mcap_score = 4
+        mcap_score = 3
         mcap_note = "小盘"
     else:
-        mcap_score = 5
+        mcap_score = 4
         mcap_note = "市值未知"
     score += mcap_score
     breakdown['mcap'] = {'score': mcap_score, 'note': mcap_note, 'value': round(mcap_yi, 0)}
     
-    # 4. Momentum score (0-15)
-    if -2 <= change <= 2:
-        momentum_score = 12
-        momentum_note = "走势平稳"
-    elif 2 < change <= 5:
-        momentum_score = 14
+    # 4. Momentum score (0-20) — healthy upward bias preferred
+    if 2 < change <= 5:
+        momentum_score = 18
         momentum_note = "温和上涨"
+    elif -2 <= change <= 2:
+        momentum_score = 14
+        momentum_note = "走势平稳"
     elif change > 5:
-        momentum_score = 10
+        momentum_score = 12
         momentum_note = "短期过涨"
     elif -5 <= change < -2:
         momentum_score = 8
@@ -2045,8 +2046,8 @@ def _lightweight_score(candidate, context=None):
     score += momentum_score
     breakdown['momentum'] = {'score': momentum_score, 'note': momentum_note, 'value': change}
     
-    # 5. Quality / Composite score (0-20)
-    quality_score = 10  # baseline
+    # 5. Quality / Composite score (0-25)
+    quality_score = 12  # baseline
     
     # Blue chip names get bonus
     blue_chip_names = ['贵州茅台', '五粮液', '中国平安', '招商银行', '美的集团',
@@ -2054,13 +2055,13 @@ def _lightweight_score(candidate, context=None):
                        '恒瑞医药', '迈瑞医疗', '海天味业', '伊利股份', '中国移动',
                        '工商银行', '建设银行', '农业银行', '中国银行']
     if any(bc in name for bc in blue_chip_names):
-        quality_score += 5
+        quality_score += 8
         quality_note = "知名蓝筹"
     elif mcap_yi > 500:
-        quality_score += 3
+        quality_score += 5
         quality_note = "大市值优质"
     elif 100 <= mcap_yi <= 500:
-        quality_score += 1
+        quality_score += 2
         quality_note = "中等市值"
     else:
         quality_note = "小市值"
@@ -2297,13 +2298,18 @@ def _apply_profile_bonus(cand, profile):
 
 def find_recommended(code, profile=None):
     """
-    Find personalized comprehensive recommended stocks across all industries.
-    Uses static stock pool + batch quotes + lightweight scoring,
-    then applies user-profile personalization bonus (industry/mcap/PE/style).
-    Excludes stocks from the same industry to avoid overlap with industry tab.
+    Find personalized comprehensive recommended stocks.
+
+    Strategy (v2, 2026-08-03 — fixes "recommended is always banks"):
+      - COLD START (no profile / profile._source == 'current-stock' / <3 signals):
+        top up directly from SAME-INDUSTRY + SAME-PRICE-BAND candidates
+        (find_alternatives + find_price_similar results), so recommendations
+        relate to the stock the user is actually viewing — NOT the whole market.
+      - WITH HISTORY: score the full static pool with rebalanced weights +
+        personalization bonus, then dedupe by industry (max 3 per industry)
+        so banks can't flood the list.
 
     Returns top 12 candidates (paginated as 4/page client-side).
-    Zero profile degrades gracefully to plain objective scoring.
     """
     profile = profile or {}
     # Profile-aware cache key (hash compactly)
@@ -2316,7 +2322,53 @@ def find_recommended(code, profile=None):
     cached_val = cached(cache_key, ttl=600)
     if cached_val:
         return cached_val
-    
+
+    # ---- Cold start: no real history → same-industry + same-price-band top-up ----
+    hist_signals = sum(1 for v in (profile.get('industry_weights') or {}).values()) + \
+                   (1 if profile.get('price_band') else 0) + \
+                   (1 if profile.get('mcap_bias') else 0) + \
+                   (1 if profile.get('pe_tolerance') else 0)
+    is_cold = (not profile) or profile.get('_source') == 'current-stock' or hist_signals <= 1
+
+    if is_cold:
+        print(f"[find_recommended] COLD START for {code}: same-industry + same-price-band top-up")
+        try:
+            industry_alts = find_alternatives(code) or []
+            price_alts = find_price_similar(code) or []
+        except Exception as e:
+            print(f"[find_recommended] cold-start alt fetch error: {e}")
+            industry_alts, price_alts = [], []
+
+        seen = {}
+        merged = []
+        for a in (industry_alts + price_alts):
+            k = a.get('code_full') or a.get('code') or ''
+            if not k or k in seen:
+                continue
+            seen[k] = True
+            # Ensure lightweight score exists (industry alts carry full scores; price alts carry lightweight)
+            if not a.get('total_score'):
+                try:
+                    sr = _lightweight_score(a)
+                    a['total_score'] = sr['total_score']
+                    a['recommendation'] = sr['recommendation']
+                    a['scores_breakdown'] = sr['breakdown']
+                except Exception:
+                    a['total_score'] = 0
+            merged.append(a)
+
+        merged.sort(key=lambda x: x.get('total_score', 0), reverse=True)
+        result = merged[:12]
+        # Ensure code_full for display
+        for a in result:
+            if not a.get('code_full'):
+                wc = a.get('wc', '')
+                a['code_full'] = a.get('code', '') + ('.SH' if wc.startswith('sh') else '.SZ')
+        print(f"[find_recommended] Cold-start returning {len(result)} candidates (merged {len(merged)})")
+        cache_set(cache_key, result)
+        return result
+
+    # ---- With history: full-market scoring + personalization + industry dedupe ----
     try:
         symbol = code.replace('.SZ', '').replace('.SH', '').replace('.BJ', '')
         
@@ -2394,9 +2446,20 @@ def find_recommended(code, profile=None):
                 cand['total_score'] = cand['total_score'] + bonus
             candidates.append(cand)
         
-        # Sort by (personalized) score, take top 12
+        # Sort by (personalized) score
         candidates.sort(key=lambda x: x['total_score'], reverse=True)
-        result = candidates[:12]
+        
+        # Industry dedupe: max 3 per industry so one sector can't flood the list
+        industry_count = {}
+        result = []
+        for c in candidates:
+            ind = c.get('industry', '') or 'unknown'
+            if industry_count.get(ind, 0) >= 3:
+                continue
+            industry_count[ind] = industry_count.get(ind, 0) + 1
+            result.append(c)
+            if len(result) >= 12:
+                break
         
         print(f"[find_recommended] Scored {len(candidates)} candidates, returning {len(result)} (profile={'yes' if profile else 'no'})")
         cache_set(cache_key, result)

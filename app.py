@@ -3179,28 +3179,45 @@ def _hk_us_price_similar(code, market, symbol, price_range=0.15):
     q = _batch_get_quotes_trusted([wc]).get(wc, {}) or {}
     price = _to_float(q.get("price"))
     if price <= 0:
-        return []
+        return {"items": [], "meta": {"strict_count": 0, "approx_count": 0, "note": "无价格数据"}}
     pool = _get_hk_us_pool(market)
     lo, hi = price * (1 - price_range), price * (1 + price_range)
     in_range = [p for p in pool if p["code"] != symbol and p["price"] > 0 and lo <= p["price"] <= hi]
-    # Top up to 12 for pagination (high-priced stocks may have few in-range peers)
-    if len(in_range) < 12:
+    # Strict in-range only; add closest out-of-range as labeled approximations
+    approximations = []
+    MIN_RESULTS = 4
+    if len(in_range) < MIN_RESULTS:
         others = [p for p in pool if p["code"] != symbol and p["price"] > 0]
         others.sort(key=lambda x: abs(x["price"] - price))
         seen = {p["code"] for p in in_range}
         for p in others:
             if p["code"] not in seen:
-                in_range.append(p)
+                p["approx"] = True
+                p["deviation_pct"] = round(abs(p["price"] - price) / price * 100, 1) if price else None
+                approximations.append(p)
                 seen.add(p["code"])
-            if len(in_range) >= 12:
+            if len(approximations) >= MIN_RESULTS - len(in_range):
                 break
-    for c in in_range:
+    for c in in_range + approximations:
         sr = _lightweight_score(c, context={"primary_price": price})
         c["total_score"] = sr["total_score"]
         c["recommendation"] = sr["recommendation"]
         c["scores_breakdown"] = sr["breakdown"]
     in_range.sort(key=lambda x: x["total_score"], reverse=True)
-    return in_range[:12]
+    approximations.sort(key=lambda x: x["total_score"], reverse=True)
+    result = in_range[:12] + approximations[:4]
+    strict_count = len(in_range[:12])
+    meta = {
+        "price_range": price_range,
+        "strict_count": strict_count,
+        "approx_count": len(approximations),
+        "note": (
+            f"±{price_range*100:.0f}% 区间内共 {strict_count} 只"
+            + (f"；其余 {len(approximations)} 只为最接近的近似标的" if approximations else "")
+            + (f"（该区间内无符合标的）" if strict_count == 0 and approximations else "")
+        ),
+    }
+    return {"items": result, "meta": meta}
 
 
 def _hk_us_recommended(code, market, symbol, profile=None):
@@ -3361,37 +3378,59 @@ def find_price_similar(code, price_range=0.15):
                 except:
                     pass
 
-        # ---- Layer 3: If still not enough, include out_of_range sorted by price proximity ----
-        if len(in_range) < 12 and out_of_range:
-            out_of_range.sort(key=lambda x: abs(x['price'] - price))
-            needed = 12 - len(in_range)
-            print(f"[find_price_similar] Layer 3: adding {needed} closest out-of-range stocks")
+        # ---- Layer 3: Strict in-range only. If too few, add closest out-of-range
+        # ---- as clearly-labeled approximations (never silently beyond the band).
+        MIN_RESULTS = 4  # bare minimum so the tab isn't empty
+        out_of_range.sort(key=lambda x: abs(x['price'] - price))
+        approximations = []
+        if len(in_range) < MIN_RESULTS and out_of_range:
+            needed = MIN_RESULTS - len(in_range)
             for cand in out_of_range[:needed]:
-                in_range.append(cand)
+                cand['approx'] = True
+                cand['deviation_pct'] = round(abs(cand['price'] - price) / price * 100, 1) if price else None
+                approximations.append(cand)
+            print(f"[find_price_similar] ±{price_range*100:.0f}% 内仅 {len(in_range)} 只，补充 {len(approximations)} 只近似(已标记)")
 
-        # ---- Layer 4: Last resort, include no_data as name-only ----
-        if len(in_range) < 12 and no_data:
-            needed = 12 - len(in_range)
+        # ---- Layer 4: name-only last resort (only if literally nothing with price) ----
+        if len(in_range) == 0 and not approximations and no_data:
+            needed = MIN_RESULTS
             print(f"[find_price_similar] Layer 4: adding {needed} name-only stocks")
             for cand in no_data[:needed]:
                 cand['price'] = 0  # will show as "--" in UI
-                in_range.append(cand)
+                cand['approx'] = True
+                cand['deviation_pct'] = None
+                approximations.append(cand)
 
-        # Score all candidates
-        for cand in in_range:
+        # Score all candidates (strict in-range + approximations)
+        all_cands = in_range + approximations
+        for cand in all_cands:
             score_result = _lightweight_score(cand)
             cand['total_score'] = score_result['total_score']
             cand['recommendation'] = score_result['recommendation']
             cand['scores_breakdown'] = score_result['breakdown']
             cand['code_full'] = cand['code'] + ('.SH' if cand['wc'].startswith('sh') else '.SZ')
 
-        # Sort by score, take top 12 (paginated as 4/page client-side)
+        # Sort by score; strict in-range first, approximations after
         in_range.sort(key=lambda x: x['total_score'], reverse=True)
-        result = in_range[:12]
+        approximations.sort(key=lambda x: x['total_score'], reverse=True)
+        result = (in_range[:12] + approximations[:4])
 
-        print(f"[find_price_similar] Price range ¥{lo:.2f}-{hi:.2f} (±{price_range*100:.0f}%), returning {len(result)} candidates")
+        # Meta: how many strictly within the band vs approximations
+        strict_count = len(in_range[:12])
+        result_meta = {
+            "price_range": price_range,
+            "strict_count": strict_count,
+            "approx_count": len(approximations),
+            "note": (
+                f"±{price_range*100:.0f}% 区间内共 {strict_count} 只"
+                + (f"；其余 {len(approximations)} 只为最接近的近似标的" if approximations else "")
+                + (f"（该区间内无符合标的）" if strict_count == 0 and approximations else "")
+            ),
+        }
+
+        print(f"[find_price_similar] ±{price_range*100:.0f}% → {strict_count} 严格 + {len(approximations)} 近似")
         cache_set(cache_key, result)
-        return result
+        return {"items": result, "meta": result_meta}
 
     except Exception as e:
         print(f"[find_price_similar] Error: {e}")
@@ -3538,7 +3577,8 @@ def find_recommended(code, profile=None):
         print(f"[find_recommended] COLD START for {code}: same-industry + same-price-band top-up")
         try:
             industry_alts = find_alternatives(code) or []
-            price_alts = find_price_similar(code) or []
+            _ps = find_price_similar(code)
+            price_alts = _ps.get("items", []) if isinstance(_ps, dict) else (_ps or [])
         except Exception as e:
             print(f"[find_recommended] cold-start alt fetch error: {e}")
             industry_alts, price_alts = [], []

@@ -9,7 +9,6 @@
   let chatOpen = false;
   let settingsOpen = false;
   let deepAnalyzing = {};  // track which dims are currently analyzing
-  let currentMarket = 'A';  // 'A' | 'HK' | 'US'
 
   // ========== Query History ==========
   const HISTORY_KEY = 'stock_analyzer_history';
@@ -27,8 +26,8 @@
     localStorage.setItem(HISTORY_KEY, JSON.stringify(h));
     renderHistoryBar();
   }
-  // Attach features (industry/mcap/pe) to history items for profile building
-  function enrichHistory(code, name, industry, mcap_yi, pe) {
+  // Attach features (industry/mcap/pe/price) to history items for profile building
+  function enrichHistory(code, name, industry, mcap_yi, pe, price) {
     let h = getHistory();
     let changed = false;
     h.forEach(item => {
@@ -37,6 +36,7 @@
         if (industry) item.industry = industry;
         if (mcap_yi) item.mcap_yi = mcap_yi;
         if (pe) item.pe = pe;
+        if (price) item.price = price;
         changed = true;
       }
     });
@@ -76,13 +76,12 @@
     let c = (input || '').trim().toUpperCase();
     if (!c) return '';
     if (/^\d{6}$/.test(c)) {
+      // Pure 6-digit code → guess exchange
       if (c.startsWith('6') || c.startsWith('9')) return c + '.SH';
       if (c.startsWith('4') || c.startsWith('8')) return c + '.BJ';
       return c + '.SZ';
     }
     if (/^\d{6}\.(SH|SZ|BJ)$/.test(c)) return c;
-    if (/^\d{5}\.HK$/.test(c)) return c;
-    if (/^[A-Z]{1,5}\.US$/.test(c)) return c;
     return '';
   }
 
@@ -113,6 +112,7 @@
     saveWatchlist(list);
   }
 
+  // Update watchlist item features after analysis (used for profile building)
   function enrichWatchlist(code, name, industry, mcap_yi, pe, price) {
     const fc = normalizeCode(code);
     if (!fc) return;
@@ -132,14 +132,6 @@
     if (changed) saveWatchlist(list);
   }
 
-  function watchTagOf(code) {
-    if (code.endsWith('.SH')) return { tag: 'SH', cls: 'tag-sh' };
-    if (code.endsWith('.BJ')) return { tag: 'BJ', cls: 'tag-bj' };
-    if (code.endsWith('.HK')) return { tag: 'HK', cls: 'tag-hk' };
-    if (code.endsWith('.US')) return { tag: 'US', cls: 'tag-us' };
-    return { tag: 'SZ', cls: 'tag-sz' };
-  }
-
   function renderWatchlistBar() {
     const bar = $('#watchlistBar');
     if (!bar) return;
@@ -151,9 +143,10 @@
       return;
     }
     const chips = list.map(item => {
-      const t = watchTagOf(item.code);
+      const tag = item.code.endsWith('.SH') ? 'SH' : item.code.endsWith('.BJ') ? 'BJ' : 'SZ';
+      const tagCls = item.code.endsWith('.SH') ? 'tag-sh' : item.code.endsWith('.BJ') ? 'tag-bj' : 'tag-sz';
       return `<span class="watch-item" data-wcode="${item.code}" title="点击分析 ${item.code}">
-        <span class="tag ${t.cls}" style="font-size:0.6rem;padding:0 4px">${t.tag}</span>
+        <span class="tag ${tagCls}" style="font-size:0.6rem;padding:0 4px">${tag}</span>
         <span class="watch-name">${item.name || item.code}</span>
         <span class="watch-code">${item.code}</span>
         <button class="watch-move" data-wmove="-1" title="左移">◀</button>
@@ -164,6 +157,7 @@
     bar.innerHTML = '<span class="watchlist-label">📌 自选股</span>' + addBtn + chips;
   }
 
+  // Watchlist events (delegated — app.js runs in IIFE, inline onclick won't work)
   document.addEventListener('click', function(e) {
     const addBtn = e.target.closest('#watchAddBtn');
     if (addBtn) {
@@ -211,6 +205,11 @@
     localStorage.setItem(PRICE_RANGE_KEY, String(val));
   }
 
+  /**
+   * Build user profile from watchlist + search history.
+   * Industry names are matched by keyword against STATIC_PEERS categories
+   * (the frontend learns them from analysis reports; fallback: keyword guess).
+   */
   /**
    * Build user profile from the most recent N interactions (watchlist + history).
    * Rules (per Itsuyo 2026-08-03):
@@ -377,67 +376,7 @@
   const settingsOverlay = $('#settingsOverlay');
   const settingsModal = $('#settingsModal');
 
-  // ========== Market Switcher ==========
-  const marketTabs = $('#marketTabs');
-  const marketHint = $('#marketHint');
-  const searchFormatHint = $('#searchFormatHint');
-
-  const MARKET_CONFIG = {
-    A: {
-      name: 'A股', flag: '🇨🇳',
-      hint: '输入A股代码（如 000001.SZ）或名称；纯数字代码自动识别',
-      formatHint: '支持格式：000607.SZ / 600968.SH / 纯数字代码',
-      placeholder: '输入A股代码或名称，如 000607、茅台、600519.SH',
-    },
-    HK: {
-      name: '港股', flag: '🇭🇰',
-      hint: '输入港股代码（如 00700.HK 或 00700）',
-      formatHint: '支持格式：00700.HK / 00700 / 腾讯控股',
-      placeholder: '输入港股代码，如 00700.HK、腾讯控股',
-    },
-    US: {
-      name: '美股', flag: '🇺🇸',
-      hint: '输入美股代码（如 AAPL.US 或 AAPL）',
-      formatHint: '支持格式：AAPL.US / AAPL / Apple',
-      placeholder: '输入美股代码，如 AAPL.US、Apple',
-    },
-  };
-
-  function switchMarket(marketKey) {
-    currentMarket = marketKey;
-    var cfg = MARKET_CONFIG[marketKey];
-
-    // Update tabs
-    var tabs = document.querySelectorAll('#marketTabs .market-tab');
-    tabs.forEach(function(t) {
-      t.classList.toggle('active', t.getAttribute('data-market') === marketKey);
-    });
-
-    // Update hints
-    if (marketHint) marketHint.textContent = cfg.hint;
-    if (searchFormatHint) searchFormatHint.textContent = cfg.formatHint;
-    searchInput.placeholder = cfg.placeholder;
-
-    // Reset
-    clearReport();
-  }
-
-  // Tab click handlers
-  if (marketTabs) {
-    marketTabs.addEventListener('click', function(e) {
-      var tab = e.target.closest('.market-tab');
-      if (!tab) return;
-      var mkt = tab.getAttribute('data-market');
-      if (mkt) switchMarket(mkt);
-    });
-  }
-
-  function clearReport() {
-    reportArea.innerHTML = '';
-    reportArea.classList.add('hidden');
-    emptyState.classList.remove('hidden');
-    currentReport = null;
-  }
+  // ========== Loading ==========
   function showLoading(msg) {
     loadingText.textContent = msg || '正在分析中...';
     loadingOverlay.classList.add('active');
@@ -469,11 +408,11 @@
       reportArea.classList.remove('hidden');
       addHistory(data.code, data.name);
       // Enrich watchlist + history with features for profile building
-      // Prefer board_name (e.g. "\u767d\u9152\u2161") over long industry_name
+      // Prefer board_name (e.g. "白酒Ⅱ") over long industry_name (e.g. "制造业-酒、饮料和精制茶制造业")
       const indDetail = (data.scores && data.scores.industry && data.scores.industry.detail) || {};
       const boardRaw = indDetail.board_name || '';
       const indName = boardRaw
-        ? boardRaw.replace(/[ⅠⅡⅢⅣⅤⅥ]+/g, '').replace(/\u884c\u4e1a$/, '').trim()
+        ? boardRaw.replace(/[ⅠⅡⅢⅣⅤ]+/g, '').replace(/行业$/, '').trim()
         : (indDetail.industry_name || '');
       const mcapYi = data.total_mv ? parseFloat(data.total_mv) : 0;
       const peV = data.pe ? parseFloat(data.pe) : 0;
@@ -543,39 +482,35 @@
 
   async function fetchSearchSuggestions(q) {
     try {
-      var resp = await fetch('/api/search?q=' + encodeURIComponent(q) + '&market=' + currentMarket);
+      var resp = await fetch('/api/search?q=' + encodeURIComponent(q));
       var data = await resp.json();
       var results = data.results || [];
-      renderSearchDropdown(results, data.market || 'A');
+      renderSearchDropdown(results);
     } catch (err) {
       console.warn('[Search] Autocomplete error:', err.message);
     }
   }
 
-  function renderSearchDropdown(results, mkt) {
+  function renderSearchDropdown(results) {
     var dropdown = document.getElementById('searchDropdown');
     if (!dropdown) return;
     _searchDropdownIdx = -1;
-    mkt = mkt || 'A';
 
     if (results.length === 0) {
       dropdown.style.display = 'none';
       return;
     }
 
-    var tagClasses = { 'A': { 'SH': 'tag-sh', 'SZ': 'tag-sz', 'BJ': 'tag-bj' }, 'HK': { 'HK': 'tag-hk' }, 'US': { 'US': 'tag-us' } };
     var html = '';
     for (var i = 0; i < results.length; i++) {
       var r = results[i];
-      var rmkt = r.market || mkt;
-      var codeFull = r.code_full || r.code || '';
-      var suffix = codeFull.indexOf('.') >= 0 ? codeFull.split('.').pop() : rmkt;
-      var tagClass = (tagClasses[rmkt] && tagClasses[rmkt][suffix]) ? tagClasses[rmkt][suffix] : 'tag-sz';
-      html += '<div class="search-dropdown-item" data-code-full="' + codeFull +
-        '" data-idx="' + i + '" data-market="' + rmkt + '">' +
-        '<span class="tag ' + tagClass + '">' + suffix + '</span>' +
+      var tag = r.code_full && r.code_full.endsWith('.SH') ? 'tag-sh' : 'tag-sz';
+      var tagLabel = r.code_full && r.code_full.endsWith('.SH') ? 'SH' : 'SZ';
+      html += '<div class="search-dropdown-item" data-code-full="' + (r.code_full || '') +
+        '" data-idx="' + i + '">' +
+        '<span class="tag ' + tag + '">' + tagLabel + '</span>' +
         '<span class="search-item-name">' + (r.name || '') + '</span>' +
-        '<span class="search-item-code">' + codeFull + '</span>' +
+        '<span class="search-item-code">' + (r.code_full || r.code || '') + '</span>' +
         '</div>';
     }
     dropdown.innerHTML = html;
@@ -586,9 +521,6 @@
     items.forEach(function(item) {
       item.addEventListener('click', function() {
         searchInput.value = item.getAttribute('data-code-full') || '';
-        // Auto-switch market if different
-        var itemMarket = item.getAttribute('data-market') || 'A';
-        if (itemMarket !== currentMarket) switchMarket(itemMarket);
         hideSearchDropdown();
         analyzeStock(searchInput.value.trim());
       });
@@ -667,13 +599,6 @@
     const pb = r.pb || 0;
     const totalMv = r.total_mv ? (r.total_mv).toFixed(2) : '--';
     const circMv = r.circ_mv ? (r.circ_mv).toFixed(2) : '--';
-    const market = r.market || 'A';
-    const marketName = r.market_name || (MARKET_CONFIG[market] ? MARKET_CONFIG[market].name : '');
-    const currency = r.currency || '¥';
-    const currencyLabel = r.currency_label || '元';
-    const marketFlag = MARKET_CONFIG[market] ? MARKET_CONFIG[market].flag : '🇨🇳';
-    // Sync market state to current
-    if (market !== currentMarket) { currentMarket = market; }
 
     const totalScore = r.total_score || 0;
     const maxScore = r.max_score || 100;
@@ -697,13 +622,13 @@
             <span class="stock-title-emoji">${boardEmoji}</span>
           </div>
           <div class="stock-title-center">
-            <h1 class="stock-title-name">${name} <span class="market-badge market-badge-${market.toLowerCase()}">${marketFlag} ${marketName}</span></h1>
+            <h1 class="stock-title-name">${name}</h1>
             <div class="stock-title-code">${r.code || code}</div>
             ${boardLabel ? `<div class="stock-title-board">${boardLabel}</div>` : ''}
             <div class="stock-title-time">📅 分析时间：${r.report_time || ''}</div>
           </div>
           <div class="stock-title-right">
-            <div class="stock-title-price">${currency} ${price.toFixed(2)}</div>
+            <div class="stock-title-price">¥ ${price.toFixed(2)}</div>
             <div class="stock-title-change ${r.change_pct >= 0 ? 'trend-up' : 'trend-down'}">${r.change_pct > 0 ? '+' : ''}${(r.change_pct||0).toFixed(2)}%</div>
           </div>
         </div>
@@ -792,7 +717,7 @@
         </div>
         <div class="section-body">
           <div class="stat-grid">
-            <div class="stat-item"><div class="stat-label">最新股价</div><div class="stat-value">${currency} ${price.toFixed(2)}</div></div>
+            <div class="stat-item"><div class="stat-label">最新股价</div><div class="stat-value">${price.toFixed(2)} 元</div></div>
             <div class="stat-item"><div class="stat-label">涨跌幅</div><div class="stat-value ${r.change_pct >= 0 ? 'trend-up' : 'trend-down'}">${r.change_pct > 0 ? '+' : ''}${r.change_pct.toFixed(2)}%</div></div>
             <div class="stat-item"><div class="stat-label">市盈率(动)</div><div class="stat-value">${pe > 0 ? pe.toFixed(2) : '亏损'}</div></div>
             <div class="stat-item"><div class="stat-label">PB</div><div class="stat-value">${pb.toFixed(2)}</div></div>
@@ -1112,10 +1037,6 @@
       }).join('');
     }
 
-    // Note: HK/US volume analysis can't break down by order size
-    const allZero = super5d === 0 && large5d === 0 && retail5d === 0;
-    const flowNote = allZero ? `<div class="risk-alert" style="background:#fef9e7;border-color:#f39c12;color:#8a6d00;margin-top:8px;font-size:0.78rem">📝 超大单/大单/散户显示为 0 是正常的：港股美股使用量价分析替代A股「主力资金流」接口。系统通过成交量方向判断进出，无法按订单大小分类，但每日净流入趋势依然准确。</div>` : '';
-
     return `
       <div class="stat-grid">
         <div class="stat-item"><div class="stat-label">近5日主力净流入</div><div class="stat-value ${main5d >= 0 ? 'trend-up' : 'trend-down'}">${main5d > 0 ? '+' : ''}${main5d.toFixed(0)} 万</div></div>
@@ -1125,7 +1046,6 @@
         <div class="stat-item"><div class="stat-label">主力流入天数(近5日)</div><div class="stat-value">${inflowDays}/5</div></div>
         <div class="stat-item"><div class="stat-label">近10日趋势</div><div class="stat-value" style="font-size:0.9rem">${trend}</div></div>
       </div>
-      ${flowNote}
       ${structure ? `<div class="risk-alert ${structure.includes('偏多') ? 'good' : 'danger'}">📊 ${structure}</div>` : ''}
       ${divergence ? `<div class="risk-alert danger">⚠️ ${divergence}</div>` : ''}
       ${flowBars ? `
@@ -1162,16 +1082,12 @@
         const titleHtml = evtUrl
           ? `<a href="${evtUrl}" target="_blank" rel="noopener" class="event-title-link" title="点击查看公告原文">${e.title || ''}</a>`
           : `<span class="event-title">${e.title || ''}</span>`;
-        const anomalyHtml = e.anomaly_note
-          ? `<div class="event-anomaly" style="color:#ff4444;font-weight:bold;font-size:0.76rem;margin-top:2px">⚠️ ${e.anomaly_note}</div>`
-          : '';
         return `<div class="event-item ${e.sentiment}">
           <span class="event-icon">${icon}</span>
           <span class="event-date">${e.date || ''}</span>
           ${titleHtml}
           ${sScore > 0 ? `<span class="event-weight">权重:${sScore}</span>` : ''}
           ${evtUrl ? `<a href="${evtUrl}" target="_blank" rel="noopener" class="event-ext-link" title="查看原文">🔗</a>` : ''}
-          ${anomalyHtml}
         </div>`;
       }).join('');
     }
@@ -1193,15 +1109,11 @@
             const keTitleHtml = keUrl
               ? `<a href="${keUrl}" target="_blank" rel="noopener" class="event-title-link" title="点击查看公告原文"><b>${e.title || ''}</b></a>`
               : `<span class="event-title"><b>${e.title || ''}</b></span>`;
-            const keAnomalyHtml = e.anomaly_note
-              ? `<div class="event-anomaly" style="color:#ff4444;font-weight:bold;font-size:0.76rem;margin-top:2px">⚠️ ${e.anomaly_note}</div>`
-              : '';
             return `<div class="event-item ${e.sentiment}" style="background:#f8f9fa;border-radius:6px;padding:6px 10px;margin:4px 0">
             <span class="event-icon">${e.sentiment === 'positive' ? '🔴' : '🟢'}</span>
             <span class="event-date">${e.date || ''}</span>
             ${keTitleHtml}
             ${keUrl ? `<a href="${keUrl}" target="_blank" rel="noopener" class="event-ext-link" title="查看原文">🔗</a>` : ''}
-            ${keAnomalyHtml}
           </div>`;
           }).join('')}
         </div>
@@ -1675,10 +1587,13 @@
 
     try {
       // Step 1: Get base preview (fast, < 3s)
+      // Personalization: pass client-side profile + user price-range setting
+      var profile = buildUserProfile();
+      var priceRange = getPriceRangeSetting();
       var baseResp = await fetch('/api/alternatives/base', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code: code, profile: buildUserProfile(), price_range: getPriceRangeSetting() }),
+        body: JSON.stringify({ code: code, profile: profile, price_range: priceRange }),
       });
       var baseData = await baseResp.json();
 
@@ -1737,7 +1652,9 @@
       var allCodes = [];
       var seen = {};
       ALL_MODES.forEach(function(mode) {
-        (_altCache[mode] || []).forEach(function(a) {
+        // Limit to first 6 per mode for deep scoring — 3 modes × 6 = 18 candidates max,
+        // keeps Vercel batch scoring responsive while still covering page 2 of pagination.
+        (_altCache[mode] || []).slice(0, 6).forEach(function(a) {
           var fc = a.code_full || (a.code && a.code.startsWith('6') ? a.code + '.SH' : a.code + '.SZ');
           if (fc && !seen[fc]) {
             seen[fc] = true;
@@ -1985,6 +1902,10 @@
       return;
     }
 
+    // Slice current page (paginated 4 per page)
+    var pageAlts = alts.slice(_altPage * ALT_PAGE_SIZE, (_altPage + 1) * ALT_PAGE_SIZE);
+    var pageStartIdx = _altPage * ALT_PAGE_SIZE;
+
     // Build cards with deep analysis button state
     // Button is disabled until all scoring is done (or errored)
     var deepBtnEnabled = (_altScoreLoadState === 'done');
@@ -1993,8 +1914,6 @@
     var btnCls = deepBtnEnabled ? 'btn-alt-deep' : 'btn-alt-deep disabled';
     var btnAttr = deepBtnEnabled ? ' data-alt-deep="' : '';
 
-    var pageAlts = alts.slice(_altPage * ALT_PAGE_SIZE, (_altPage + 1) * ALT_PAGE_SIZE);
-    var pageStartIdx = _altPage * ALT_PAGE_SIZE;
     var cardsHtml = '';
     for (var i = 0; i < pageAlts.length; i++) {
       var a = pageAlts[i];
@@ -2041,6 +1960,7 @@
           var profile = buildUserProfile();
           var lines = profileReasonLines(profile);
           if (lines.length > 0) {
+            // Match industry if candidate has one
             reasonHtml = '<div class="alt-reason">✓ ' + lines.slice(0, 2).join(' · ') + '</div>';
           }
         }
@@ -2051,7 +1971,7 @@
           '<div class="alt-name"><span class="alt-rank">#' + (globalIdx + 1) + '</span> ' + (a.name || '') + '</div>' +
           '<div class="alt-code">' + fullCode + '</div>' +
           '<div class="alt-stats">' +
-            '<div class="alt-stat"><div class="alt-stat-label">价格</div><span>' + (currentMarket === 'HK' ? 'HK$' : currentMarket === 'US' ? 'US$' : '¥') + ((a.price||0)).toFixed(2) + '</span></div>' +
+            '<div class="alt-stat"><div class="alt-stat-label">价格</div><span>¥' + ((a.price||0)).toFixed(2) + '</span></div>' +
             '<div class="alt-stat"><div class="alt-stat-label">PE</div><span>' + ((a.pe||0) > 0 ? (a.pe||0).toFixed(1) : '亏损') + '</span></div>' +
             '<div class="alt-stat"><div class="alt-stat-label">PB</div><span>' + ((a.pb||0)).toFixed(2) + '</span></div>' +
             '<div class="alt-stat"><div class="alt-stat-label">涨跌</div><span class="' + ((a.change||0) >= 0 ? 'trend-up' : 'trend-down') + '">' + ((a.change||0) > 0 ? '+' : '') + (a.change||0).toFixed(2) + '%</span></div>' +
@@ -2926,9 +2846,122 @@
   });
 
   // ========== Settings Modal ==========
+  // ========== AI Provider Presets ==========
+  const PROVIDER_PRESETS = {
+    openai:      { base: 'https://api.openai.com/v1',                       model: 'gpt-4o-mini',             name: 'OpenAI' },
+    deepseek:    { base: 'https://api.deepseek.com/v1',                     model: 'deepseek-chat',            name: 'DeepSeek' },
+    siliconflow: { base: 'https://api.siliconflow.cn/v1',                   model: 'deepseek-ai/DeepSeek-V3',  name: '硅基流动' },
+    moonshot:    { base: 'https://api.moonshot.cn/v1',                      model: 'moonshot-v1-8k',           name: 'Kimi' },
+    zhipu:       { base: 'https://open.bigmodel.cn/api/paas/v4',            model: 'glm-4-flash',              name: '智谱GLM' },
+    qwen:        { base: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus',            name: '通义千问' },
+    groq:        { base: 'https://api.groq.com/openai/v1',                  model: 'llama-3.1-70b-versatile',  name: 'Groq' },
+    ollama:      { base: 'http://localhost:11434/v1',                       model: 'qwen2.5:7b',               name: '本地Ollama' },
+    custom:      { base: '',                                                model: '',                         name: '自定义' },
+  };
+
+  // System prompt templates (curated from finance-analysis conventions)
+  const PROMPT_TEMPLATES = {
+    professional: '你是一位专业的股票投资分析师，擅长基本面分析（ROE、PE/PB、现金流、行业格局）、技术面分析（均线、MACD、KDJ、量价关系）和投资策略。回答应专业、客观、结构清晰，包含：核心观点 → 论据（数据支撑）→ 风险提示。所有结论基于用户提供的公开数据，不构成投资建议。',
+    value: '你是一位价值投资分析师（格雷厄姆/巴菲特风格）。分析时优先关注：估值是否合理（PE/PB 分位）、盈利质量（ROE 稳定性、自由现金流）、安全边际、护城河与行业格局。倾向长期持有视角，对短期波动保持克制，明确指出高估/低估的依据。',
+    technical: '你是一位技术分析专家。擅长解读均线系统、MACD/KDJ/RSI 指标、K线形态、量价关系、支撑阻力位。回答时给出明确的技术信号判断（多头/空头/震荡），标注关键价位和止损位，提醒技术分析的局限性。',
+    plain: '你是一位能把复杂股市知识讲得通俗易懂的理财顾问。用生活化的比喻解释专业术语，避免堆砌数据。回答简短直接，先说结论再解释，适合投资新手理解。',
+  };
+
+  function applyProviderPreset() {
+    const provider = $('#apiProvider').value;
+    const preset = PROVIDER_PRESETS[provider] || PROVIDER_PRESETS.custom;
+    if (preset.base) $('#apiBase').value = preset.base;
+    if (preset.model) $('#apiModel').value = preset.model;
+    // Hide model list when provider changes
+    const wrap = $('#modelListWrap');
+    if (wrap) wrap.style.display = 'none';
+  }
+
+  async function fetchModels() {
+    const apiKey = $('#apiKey').value.trim();
+    const apiBase = $('#apiBase').value.trim();
+    const resultDiv = $('#testResult');
+    const wrap = $('#modelListWrap');
+    const select = $('#modelList');
+
+    if (!apiKey || apiKey.includes('****')) {
+      if (resultDiv) {
+        resultDiv.style.display = 'block';
+        resultDiv.className = 'test-result fail';
+        resultDiv.textContent = '❌ 请先输入完整的 API Key 再获取模型列表';
+      }
+      return;
+    }
+
+    if (wrap) wrap.style.display = 'none';
+    if (resultDiv) {
+      resultDiv.style.display = 'block';
+      resultDiv.className = 'test-result';
+      resultDiv.textContent = '⏳ 正在拉取模型列表...';
+    }
+
+    try {
+      const resp = await fetch('/api/models', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ api_key: apiKey, api_base: apiBase }),
+      });
+      const data = await resp.json();
+      if (data.models && data.models.length > 0) {
+        // Prefer chat-capable / text models
+        let models = data.models;
+        // Sort: recommended (contains common chat keywords) first, then alphabetical
+        const prio = (m) => {
+          const s = m.toLowerCase();
+          if (/gpt-4|deepseek|qwen|glm|moonshot|llama|claude/.test(s)) return 0;
+          if (/gpt|chat|instruct/.test(s)) return 1;
+          return 2;
+        };
+        models.sort((a, b) => prio(a) - prio(b) || a.localeCompare(b));
+        select.innerHTML = models.map(m => `<option value="${m}">${m}</option>`).join('');
+        wrap.style.display = 'block';
+        // Auto-select current model if present
+        const cur = $('#apiModel').value.trim();
+        if (cur && models.includes(cur)) select.value = cur;
+        if (resultDiv) {
+          resultDiv.className = 'test-result success';
+          resultDiv.textContent = '✅ 找到 ' + models.length + ' 个可用模型，请从下拉选择';
+        }
+      } else {
+        if (resultDiv) {
+          resultDiv.className = 'test-result fail';
+          resultDiv.textContent = '❌ ' + (data.error || '该提供商不支持模型列表接口（可手动输入模型名）');
+        }
+      }
+    } catch (err) {
+      if (resultDiv) {
+        resultDiv.className = 'test-result fail';
+        resultDiv.textContent = '❌ 拉取失败: ' + err.message;
+      }
+    }
+  }
+
   settingsBtn.addEventListener('click', () => openSettings());
   settingsOverlay.addEventListener('click', (e) => {
     if (e.target === settingsOverlay) closeSettings();
+  });
+
+  // Provider change → auto-fill base + model
+  $('#apiProvider').addEventListener('change', applyProviderPreset);
+  $('#fetchModelsBtn').addEventListener('click', fetchModels);
+  // Model list selection → fill model input
+  document.addEventListener('change', (e) => {
+    if (e.target && e.target.id === 'modelList') {
+      $('#apiModel').value = e.target.value;
+    }
+  });
+  // Prompt template buttons
+  document.addEventListener('click', (e) => {
+    const tplBtn = e.target.closest('.prompt-template');
+    if (tplBtn) {
+      const tpl = PROMPT_TEMPLATES[tplBtn.getAttribute('data-tpl')];
+      if (tpl) $('#systemPrompt').value = tpl;
+    }
   });
 
   async function openSettings() {

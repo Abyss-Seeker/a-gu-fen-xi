@@ -1653,7 +1653,7 @@
       var seen = {};
       ALL_MODES.forEach(function(mode) {
         // Limit to first 6 per mode for deep scoring — 3 modes × 6 = 18 candidates max,
-        // keeps Vercel batch scoring responsive while still covering page 2 of "换一批".
+        // keeps Vercel batch scoring responsive while still covering page 2 of pagination.
         (_altCache[mode] || []).slice(0, 6).forEach(function(a) {
           var fc = a.code_full || (a.code && a.code.startsWith('6') ? a.code + '.SH' : a.code + '.SZ');
           if (fc && !seen[fc]) {
@@ -1871,7 +1871,7 @@
     loadAllAlternatives(code);
   }
 
-  // Pagination state for "换一批" (per active mode, 4 per page)
+  // Pagination state (per active mode, 4 per page)
   var _altPage = 0;
   var ALT_PAGE_SIZE = 4;
 
@@ -1990,13 +1990,13 @@
         '</div>';
     }
 
-    // "换一批" pagination controls + price-range slider (price_similar mode only)
+    // Pagination controls + price-range slider (price_similar mode only)
     var pagerHtml = '';
     if (totalPages > 1) {
       pagerHtml += '<div class="alt-pager">' +
         '<span style="font-size:0.75rem;color:var(--text-secondary)">第 ' + (_altPage + 1) + '/' + totalPages + ' 页 · 共 ' + alts.length + ' 只</span> ' +
-        '<button class="btn-alt-page" data-alt-page="prev" ' + (_altPage === 0 ? 'disabled' : '') + '>← 上一批</button> ' +
-        '<button class="btn-alt-page" data-alt-page="next" ' + (_altPage >= totalPages - 1 ? 'disabled' : '') + '>换一批 →</button>' +
+        '<button class="btn-alt-page" data-alt-page="prev" ' + (_altPage === 0 ? 'disabled' : '') + '>← 上一页</button> ' +
+        '<button class="btn-alt-page" data-alt-page="next" ' + (_altPage >= totalPages - 1 ? 'disabled' : '') + '>下一页 →</button>' +
         '</div>';
     }
 
@@ -2050,7 +2050,7 @@
       if (mode) switchAltTab(mode);
       return;
     }
-    // Pagination: 换一批
+    // Pagination: prev/next page
     var pageBtn = e.target.closest('.btn-alt-page');
     if (pageBtn && pageBtn.id !== 'altRangeApply') {
       e.stopPropagation();

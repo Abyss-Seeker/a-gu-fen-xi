@@ -1710,6 +1710,56 @@ def test_chat():
         return jsonify({"success": False, "message": str(e)})
 
 
+@app.route("/api/models", methods=["POST"])
+def api_models():
+    """Proxy the provider's /models endpoint so the frontend can build a
+    model dropdown. Works with any OpenAI-compatible API."""
+    data = request.json or {}
+    api_key = (data.get("api_key") or "").strip()
+    api_base = (data.get("api_base") or "").strip() or "https://api.openai.com/v1"
+
+    if not api_key:
+        return jsonify({"models": [], "error": "缺少 API Key"}), 400
+
+    try:
+        import urllib.request
+        from urllib.error import HTTPError, URLError
+
+        url = api_base.rstrip("/") + "/models"
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {api_key}"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            payload = resp.read().decode("utf-8")
+        import json as _json
+        data_json = _json.loads(payload)
+        items = data_json.get("data", [])
+        models = []
+        for it in items:
+            if isinstance(it, dict):
+                mid = it.get("id") or it.get("model") or it.get("name")
+                if mid:
+                    models.append(str(mid))
+            elif isinstance(it, str):
+                models.append(it)
+        seen = set()
+        uniq = []
+        for m in models:
+            if m not in seen:
+                seen.add(m)
+                uniq.append(m)
+        return jsonify({"models": uniq[:200], "error": ""})
+    except HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode("utf-8")[:300]
+        except Exception:
+            pass
+        return jsonify({"models": [], "error": f"HTTP {e.code}: {body}"}), 502
+    except URLError as e:
+        return jsonify({"models": [], "error": f"网络错误: {e.reason}"}), 502
+    except Exception as e:
+        return jsonify({"models": [], "error": str(e)[:200]}), 500
+
+
 # ---------- Deep Analysis Cache ----------
 DEEP_CACHE = {}  # key: "code:dim" -> (reply, timestamp)
 DEEP_CACHE_TTL = 600  # 10 minutes

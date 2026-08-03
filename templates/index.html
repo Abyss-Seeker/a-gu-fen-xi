@@ -172,37 +172,54 @@
           <option value="openai">OpenAI</option>
           <option value="deepseek">DeepSeek</option>
           <option value="siliconflow">硅基流动 (SiliconFlow)</option>
+          <option value="moonshot">Kimi (Moonshot)</option>
+          <option value="zhipu">智谱 GLM</option>
+          <option value="qwen">通义千问</option>
+          <option value="groq">Groq</option>
+          <option value="ollama">本地 Ollama</option>
           <option value="custom">自定义</option>
         </select>
+        <div style="font-size:0.75rem;color:var(--text-secondary);margin-top:2px">
+          选择提供商后自动填充 API Base 与推荐模型，可手动修改
+        </div>
       </div>
 
       <div class="form-group">
         <label>API Key <span style="color:var(--danger)">*</span></label>
         <input type="password" id="apiKey" placeholder="sk-...">
         <div style="font-size:0.75rem;color:var(--text-secondary);margin-top:2px">
-          推荐免费/低价方案：DeepSeek (chat.deepseek.com) 或 硅基流动 (siliconflow.cn)
+          推荐免费/低价方案：DeepSeek (chat.deepseek.com)、硅基流动 (siliconflow.cn)、智谱 GLM (bigmodel.cn)、Kimi (platform.moonshot.cn)
         </div>
       </div>
 
       <div class="form-group">
         <label>API Base URL</label>
         <input type="text" id="apiBase" placeholder="https://api.openai.com/v1">
-        <div style="font-size:0.75rem;color:var(--text-secondary);margin-top:2px">
-          DeepSeek: https://api.deepseek.com/v1 | 硅基流动: https://api.siliconflow.cn/v1
-        </div>
       </div>
 
       <div class="form-group">
         <label>模型名称</label>
-        <input type="text" id="apiModel" placeholder="gpt-4o-mini">
-        <div style="font-size:0.75rem;color:var(--text-secondary);margin-top:2px">
-          DeepSeek: deepseek-chat | 硅基流动: deepseek-ai/DeepSeek-V3
+        <div style="display:flex;gap:6px;align-items:center">
+          <input type="text" id="apiModel" placeholder="gpt-4o-mini" style="flex:1">
+          <button class="btn btn-outline btn-sm" id="fetchModelsBtn" title="用当前 API Key 拉取可用模型列表">📋 获取模型列表</button>
+        </div>
+        <div id="modelListWrap" style="display:none;margin-top:6px">
+          <select id="modelList" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:var(--radius);font-size:0.85rem"></select>
+        </div>
+        <div style="font-size:0.75rem;color:var(--text-secondary);margin-top:2px" id="modelHint">
+          点「获取模型列表」拉取该提供商全部可用模型，选中后自动填入
         </div>
       </div>
 
       <div class="form-group">
-        <label>系统提示词（可选）</label>
+        <label>系统提示词 <span style="font-size:0.7rem;color:var(--text-secondary)">（可选）</span></label>
         <textarea id="systemPrompt" placeholder="自定义 AI 助手的角色设定..."></textarea>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
+          <button class="btn btn-outline btn-sm prompt-template" data-tpl="professional">💼 专业分析师</button>
+          <button class="btn btn-outline btn-sm prompt-template" data-tpl="value">🛡️ 价值投资派</button>
+          <button class="btn btn-outline btn-sm prompt-template" data-tpl="technical">📈 技术分析派</button>
+          <button class="btn btn-outline btn-sm prompt-template" data-tpl="plain">🗣️ 通俗易懂</button>
+        </div>
       </div>
 
       <div class="test-result" id="testResult"></div>

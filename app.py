@@ -3184,7 +3184,8 @@ def _hk_us_price_similar(code, market, symbol, price_range=0.15):
     pool = _get_hk_us_pool(market)
     lo, hi = price * (1 - price_range), price * (1 + price_range)
     in_range = [p for p in pool if p["code"] != symbol and p["price"] > 0 and lo <= p["price"] <= hi]
-    if len(in_range) < 4:
+    # Top up to 12 for pagination (high-priced stocks may have few in-range peers)
+    if len(in_range) < 12:
         others = [p for p in pool if p["code"] != symbol and p["price"] > 0]
         others.sort(key=lambda x: abs(x["price"] - price))
         seen = {p["code"] for p in in_range}
@@ -3343,9 +3344,11 @@ def find_price_similar(code, price_range=0.15):
                 no_data.append(cand)
 
         # ---- Layer 2: If not enough in-range, try Sina single quotes for no_data ----
-        if len(in_range) < 4 and no_data:
+        # Target 12 (pagination): a high-priced stock may have only a few in-range
+        # peers; without topping up we'd return just 4 and the pager would never show.
+        if len(in_range) < 12 and no_data:
             print(f"[find_price_similar] Layer 1 only {len(in_range)} in range, trying Sina singles for {len(no_data)} without data")
-            for cand in no_data[:20]:  # try up to 20
+            for cand in no_data[:30]:  # try up to 30
                 try:
                     fb = api_fallback.sina_get_stock_info(cand['wc'] if cand['wc'].startswith('sh') else cand['wc'])
                     p = fb.get('最新价', 0)
@@ -3360,16 +3363,16 @@ def find_price_similar(code, price_range=0.15):
                     pass
 
         # ---- Layer 3: If still not enough, include out_of_range sorted by price proximity ----
-        if len(in_range) < 4 and out_of_range:
+        if len(in_range) < 12 and out_of_range:
             out_of_range.sort(key=lambda x: abs(x['price'] - price))
-            needed = 4 - len(in_range)
+            needed = 12 - len(in_range)
             print(f"[find_price_similar] Layer 3: adding {needed} closest out-of-range stocks")
             for cand in out_of_range[:needed]:
                 in_range.append(cand)
 
         # ---- Layer 4: Last resort, include no_data as name-only ----
-        if len(in_range) < 4 and no_data:
-            needed = 4 - len(in_range)
+        if len(in_range) < 12 and no_data:
+            needed = 12 - len(in_range)
             print(f"[find_price_similar] Layer 4: adding {needed} name-only stocks")
             for cand in no_data[:needed]:
                 cand['price'] = 0  # will show as "--" in UI

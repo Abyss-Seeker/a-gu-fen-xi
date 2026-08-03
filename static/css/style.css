@@ -406,8 +406,8 @@ body {
   min-width: 70px;
 }
 .event-title { flex: 1; line-height: 1.4; }
-.event-item.positive .event-title { color: #27ae60; }
-.event-item.negative .event-title { color: #e74c3c; }
+.event-item.positive .event-title { color: #d63031; }   /* bullish = red (A-share convention) */
+.event-item.negative .event-title { color: #00b894; }   /* bearish = green */
 .event-title-link {
   flex: 1;
   line-height: 1.4;
@@ -420,8 +420,8 @@ body {
   color: #6c5ce7;
   text-decoration: underline;
 }
-.event-item.positive .event-title-link { color: #27ae60; }
-.event-item.negative .event-title-link { color: #e74c3c; }
+.event-item.positive .event-title-link { color: #d63031; }
+.event-item.negative .event-title-link { color: #00b894; }
 .event-ext-link {
   flex-shrink: 0;
   font-size: 0.75rem;

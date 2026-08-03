@@ -26,6 +26,21 @@
     localStorage.setItem(HISTORY_KEY, JSON.stringify(h));
     renderHistoryBar();
   }
+  // Attach features (industry/mcap/pe) to history items (watchlist profile uses these)
+  function enrichHistory(code, name, industry, mcap_yi, pe) {
+    let h = getHistory();
+    let changed = false;
+    h.forEach(item => {
+      if (item.code === code) {
+        if (name) item.name = name;
+        if (industry) item.industry = industry;
+        if (mcap_yi) item.mcap_yi = mcap_yi;
+        if (pe) item.pe = pe;
+        changed = true;
+      }
+    });
+    if (changed) localStorage.setItem(HISTORY_KEY, JSON.stringify(h));
+  }
 
   function renderHistoryBar() {
     const h = getHistory();
@@ -41,6 +56,137 @@
         `<span class="history-chip" onclick="document.getElementById('searchCode').value='${item.code}';document.getElementById('searchBtn').click()" title="${item.time}">${item.name}</span>`
       ).join('');
   }
+
+  // ========== Watchlist (自选股) ==========
+  const WATCHLIST_KEY = 'stock_analyzer_watchlist';
+  // item: { code, name, industry, mcap_yi, pe, ts }
+
+  function getWatchlist() {
+    try { return JSON.parse(localStorage.getItem(WATCHLIST_KEY) || '[]'); }
+    catch (e) { return []; }
+  }
+
+  function saveWatchlist(list) {
+    localStorage.setItem(WATCHLIST_KEY, JSON.stringify(list));
+    renderWatchlistBar();
+  }
+
+  function normalizeCode(input) {
+    let c = (input || '').trim().toUpperCase();
+    if (!c) return '';
+    if (/^\d{6}$/.test(c)) {
+      if (c.startsWith('6') || c.startsWith('9')) return c + '.SH';
+      if (c.startsWith('4') || c.startsWith('8')) return c + '.BJ';
+      return c + '.SZ';
+    }
+    if (/^\d{6}\.(SH|SZ|BJ)$/.test(c)) return c;
+    return '';
+  }
+
+  function addToWatchlist(code, name) {
+    const fc = normalizeCode(code);
+    if (!fc) { alert('无法识别的股票代码: ' + code); return; }
+    const list = getWatchlist();
+    if (list.some(item => item.code === fc)) {
+      alert('「' + (name || fc) + '」已在自选股中');
+      return;
+    }
+    list.push({ code: fc, name: name || fc, industry: '', mcap_yi: 0, pe: 0, ts: Date.now() });
+    saveWatchlist(list);
+  }
+
+  function removeFromWatchlist(code) {
+    saveWatchlist(getWatchlist().filter(item => item.code !== code));
+  }
+
+  function moveWatchlistItem(code, dir) {
+    const list = getWatchlist();
+    const idx = list.findIndex(item => item.code === code);
+    const target = idx + dir;
+    if (idx < 0 || target < 0 || target >= list.length) return;
+    const tmp = list[idx];
+    list[idx] = list[target];
+    list[target] = tmp;
+    saveWatchlist(list);
+  }
+
+  function enrichWatchlist(code, name, industry, mcap_yi, pe) {
+    const fc = normalizeCode(code);
+    if (!fc) return;
+    const list = getWatchlist();
+    let changed = false;
+    list.forEach(item => {
+      if (item.code === fc) {
+        item.name = name || item.name;
+        if (industry) item.industry = industry;
+        if (mcap_yi) item.mcap_yi = mcap_yi;
+        if (pe) item.pe = pe;
+        item.ts = Date.now();
+        changed = true;
+      }
+    });
+    if (changed) saveWatchlist(list);
+  }
+
+  function watchTagOf(code) {
+    if (code.endsWith('.SH')) return { tag: 'SH', cls: 'tag-sh' };
+    if (code.endsWith('.BJ')) return { tag: 'BJ', cls: 'tag-bj' };
+    return { tag: 'SZ', cls: 'tag-sz' };
+  }
+
+  function renderWatchlistBar() {
+    const bar = $('#watchlistBar');
+    if (!bar) return;
+    const list = getWatchlist();
+    const addBtn = '<button class="watch-add" id="watchAddBtn" title="将当前搜索的股票加入自选股">＋ 添加</button>';
+    if (list.length === 0) {
+      bar.innerHTML = '<span class="watchlist-label">📌 自选股</span>' + addBtn +
+        '<span class="watch-empty">（空）搜索股票后点「＋ 添加」，或输入代码后点添加</span>';
+      return;
+    }
+    const chips = list.map(item => {
+      const t = watchTagOf(item.code);
+      return `<span class="watch-item" data-wcode="${item.code}" title="点击分析 ${item.code}">
+        <span class="tag ${t.cls}" style="font-size:0.6rem;padding:0 4px">${t.tag}</span>
+        <span class="watch-name">${item.name || item.code}</span>
+        <span class="watch-code">${item.code}</span>
+        <button class="watch-move" data-wmove="-1" title="左移">◀</button>
+        <button class="watch-move" data-wmove="1" title="右移">▶</button>
+        <button class="watch-del" data-wdel="${item.code}" title="删除">×</button>
+      </span>`;
+    }).join('');
+    bar.innerHTML = '<span class="watchlist-label">📌 自选股</span>' + addBtn + chips;
+  }
+
+  document.addEventListener('click', function(e) {
+    const addBtn = e.target.closest('#watchAddBtn');
+    if (addBtn) {
+      const input = $('#searchCode');
+      const code = input ? input.value.trim() : '';
+      if (!code) { alert('请先在搜索框输入要添加的股票代码'); return; }
+      const sel = document.querySelector('.search-dropdown-item.active');
+      const fc = sel ? sel.getAttribute('data-code-full') : normalizeCode(code);
+      addToWatchlist(fc || code, sel ? sel.querySelector('.search-item-name').textContent : '');
+      return;
+    }
+    const delBtn = e.target.closest('.watch-del');
+    if (delBtn) {
+      removeFromWatchlist(delBtn.getAttribute('data-wdel'));
+      return;
+    }
+    const mvBtn = e.target.closest('.watch-move');
+    if (mvBtn) {
+      const item = mvBtn.closest('.watch-item');
+      if (item) moveWatchlistItem(item.getAttribute('data-wcode'), parseInt(mvBtn.getAttribute('data-wmove')));
+      return;
+    }
+    const wItem = e.target.closest('.watch-item');
+    if (wItem && !e.target.closest('.watch-del') && !e.target.closest('.watch-move')) {
+      const input = $('#searchCode');
+      if (input) input.value = wItem.getAttribute('data-wcode');
+      $('#searchBtn').click();
+    }
+  });
 
   // ========== DOM Refs ==========
   const $ = (sel) => document.querySelector(sel);
@@ -91,6 +237,16 @@
       emptyState.classList.add('hidden');
       reportArea.classList.remove('hidden');
       addHistory(data.code, data.name);
+      // Enrich history with features for watchlist profile
+      const indDetail = (data.scores && data.scores.industry && data.scores.industry.detail) || {};
+      const boardRaw = indDetail.board_name || '';
+      const indName = boardRaw
+        ? boardRaw.replace(/[ⅠⅡⅢⅣⅤⅥ]+/g, '').replace(/\u884c\u4e1a$/, '').trim()
+        : (indDetail.industry_name || '');
+      const mcapYi = data.total_mv ? parseFloat(data.total_mv) : 0;
+      const peV = data.pe ? parseFloat(data.pe) : 0;
+      enrichHistory(data.code, data.name, indName, mcapYi, peV);
+      enrichWatchlist(data.code, data.name, indName, mcapYi, peV);
       loadAlternatives(code);
       window.scrollTo({ top: 0, behavior: 'smooth' });
     } catch (err) {
@@ -478,7 +634,13 @@
     const turnover = td.turnover || 0;
 
     let maRows = '';
-    for (const [name, val] of Object.entries(mas)) {
+    // Sort MA keys numerically: MA5 < MA10 < MA20 < MA60 < MA120 < MA250
+    const maEntries = Object.entries(mas).sort((a, b) => {
+      const na = parseInt((a[0] || '').replace(/[^0-9]/g, ''), 10) || 0;
+      const nb = parseInt((b[0] || '').replace(/[^0-9]/g, ''), 10) || 0;
+      return na - nb;
+    });
+    for (const [name, val] of maEntries) {
       const vs = val ? (r.price - val > 0 ? '上方' : '下方') : '--';
       maRows += `<tr><td>${name}</td><td>${val ? val.toFixed(2) : '--'}</td><td>${val ? ((r.price - val) / val * 100).toFixed(1) + '%' : '--'}</td><td class="${r.price > val ? 'trend-up' : 'trend-down'}">${val ? vs : '--'}</td></tr>`;
     }
@@ -566,8 +728,9 @@
       eventItems = events.map(e => {
         const sScore = e.sentiment_score || 0;
         let icon = '⚪';
-        if (e.sentiment === 'positive') icon = sScore >= 4 ? '🟢🟢' : '🟢';
-        else if (e.sentiment === 'negative') icon = sScore >= 4 ? '🔴🔴' : '🔴';
+        // A-share convention: bullish=red, bearish=green
+        if (e.sentiment === 'positive') icon = sScore >= 4 ? '🔴🔴' : '🔴';
+        else if (e.sentiment === 'negative') icon = sScore >= 4 ? '🟢🟢' : '🟢';
         const evtUrl = e.url || '';
         const titleHtml = evtUrl
           ? `<a href="${evtUrl}" target="_blank" rel="noopener" class="event-title-link" title="点击查看公告原文">${e.title || ''}</a>`
@@ -600,7 +763,7 @@
               ? `<a href="${keUrl}" target="_blank" rel="noopener" class="event-title-link" title="点击查看公告原文"><b>${e.title || ''}</b></a>`
               : `<span class="event-title"><b>${e.title || ''}</b></span>`;
             return `<div class="event-item ${e.sentiment}" style="background:#f8f9fa;border-radius:6px;padding:6px 10px;margin:4px 0">
-            <span class="event-icon">${e.sentiment === 'positive' ? '🟢' : '🔴'}</span>
+            <span class="event-icon">${e.sentiment === 'positive' ? '🔴' : '🟢'}</span>
             <span class="event-date">${e.date || ''}</span>
             ${keTitleHtml}
             ${keUrl ? `<a href="${keUrl}" target="_blank" rel="noopener" class="event-ext-link" title="查看原文">🔗</a>` : ''}
@@ -1581,6 +1744,10 @@
       if (msgs) msgs.innerHTML = '';
     });
   }
+
+  // Watchlist init
+  renderWatchlistBar();
+  renderHistoryBar();
 
   // Check if already in debug mode on load
   if (debugMode) {
